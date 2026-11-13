@@ -3,6 +3,9 @@
 //!
 //! [`routing`] is the pure piece: given a DUT's description from a Treadmill
 //! host spec, it decides which remote transport serves which `tock`
-//! capability.
+//! capability. [`reservation`] is the other pure piece: given the caller's
+//! current jobs and a report of which hosts match, it decides whether to
+//! reuse a held job or create a new one.
 
+pub mod reservation;
 pub mod routing;
