@@ -132,7 +132,14 @@ impl<F: LinkFactory> Relay<F> {
         })?;
         if !self.links.contains_key(&transport) {
             let connection = self.factory.open(transport)?;
-            let client = Client::open(connection, CLIENT_NAME, &[])?;
+            // Greeted with the capability the link is being opened for, and
+            // not with `&[]`: the far end is `tock --transport <name>
+            // broker`, which opens links only for what the greeting
+            // declares in `needs` and then advertises the capabilities of
+            // the links it opened. Declaring nothing would have it open
+            // nothing, advertise nothing, and fail the route check below on
+            // every capability.
+            let client = Client::open(connection, CLIENT_NAME, std::slice::from_ref(capability))?;
             // A route is a claim about a transport, and this is where it is
             // checked against what the transport says of itself.
             if !client.capabilities.contains(capability) {
@@ -278,9 +285,22 @@ mod tests {
         }
     }
 
-    /// An in-process stand-in for a remote transport: answers `Hello` from
-    /// its configured capability list, and everything else from its queued
+    /// An in-process stand-in for a remote transport, answering `Hello` the
+    /// way the real far end does and everything else from its queued
     /// answers (or `Ok(Response::Ok)` if the queue is empty).
+    ///
+    /// The far end of a link is `tock --transport <name> broker`, and what
+    /// it advertises is not a static list: it opens a link **only for the
+    /// capabilities the greeting declared in `needs`**, then reports the
+    /// capabilities of the links it opened (`tock-cli/src/broker.rs`). An
+    /// empty `needs` opens nothing and so advertises nothing. That is
+    /// modelled here rather than answered from `capabilities` outright,
+    /// because a relay that greets with `&[]` can never route anything --
+    /// and a fake that ignores `needs` cannot see that.
+    ///
+    /// `capabilities` is therefore what this link *could* serve: a greeting
+    /// that declares any of them opens the one link behind this service,
+    /// whose whole capability set is then advertised.
     struct FakeLink {
         spec: LinkSpec,
     }
@@ -292,12 +312,20 @@ mod tests {
             _payload: Vec<u8>,
         ) -> Result<(Response, Vec<u8>), ProtoError> {
             self.spec.seen.lock().unwrap().push(request.clone());
-            if let Request::Hello { .. } = request {
+            if let Request::Hello { needs, .. } = &request {
+                let opened = needs
+                    .iter()
+                    .any(|need| self.spec.capabilities.contains(need));
+                let capabilities = if opened {
+                    self.spec.capabilities.clone()
+                } else {
+                    Vec::new()
+                };
                 return Ok((
                     Response::Hello {
                         protocol: tock_proto::PROTOCOL_VERSION,
                         version: "fake".into(),
-                        capabilities: self.spec.capabilities.clone(),
+                        capabilities,
                         options: vec![],
                     },
                     vec![],
@@ -412,6 +440,40 @@ mod tests {
                 timeout_ms: 10
             }
         )));
+    }
+
+    #[test]
+    fn a_link_is_greeted_with_the_capability_it_is_opened_for() {
+        // The far end opens links only for what the greeting declares, so a
+        // greeting that declares nothing gets a link that advertises
+        // nothing -- and every route claim against it fails.
+        let handle = both_links();
+        let mut relay = Relay::new(full_routing(), FakeFactory(handle.clone()), vec![]);
+
+        relay
+            .call(
+                Request::ConsoleRead {
+                    max: 1,
+                    timeout_ms: 1,
+                },
+                vec![],
+            )
+            .unwrap();
+
+        let serial = handle.links.lock().unwrap()[&RemoteTransport::Serial].clone();
+        let greeting = serial
+            .requests()
+            .into_iter()
+            .find_map(|request| match request {
+                Request::Hello { needs, .. } => Some(needs),
+                _ => None,
+            })
+            .expect("the link should have been greeted");
+        assert_eq!(
+            greeting,
+            vec![Capability::Console],
+            "the link must be greeted with the capability it is being opened for"
+        );
     }
 
     #[test]
