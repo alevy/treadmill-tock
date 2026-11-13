@@ -1,8 +1,10 @@
 [package]
 name = "treadmill-tock"
-version.workspace = true
-authors.workspace = true
-edition.workspace = true
+version = "0.1.0"
+authors = ["Treadmill Project Developers <treadmill@tockos.org>"]
+edition = "2024"
+description = "Drive a Tock board held in a Treadmill testbed from the `tock` CLI"
+publish = false
 
 [[bin]]
 name = "tml-tock-agent"
@@ -12,19 +14,40 @@ path = "src/bin/tml-tock-agent.rs"
 name = "tock-transport-treadmill"
 path = "src/bin/tock-transport-treadmill.rs"
 
+# This crate sits downstream of two projects and upstream of neither, so both
+# arrive as git dependencies pinned to an exact revision. Neither pin is a
+# release: they are the commits this was developed against, and nothing will
+# tell you when they go stale -- `cargo update` will not move them and no CI
+# here watches either repository. Bump them deliberately, and re-run the
+# manual verification in `docs/` when you do.
+#
+#   tock-proto     -- the protocol `tock` speaks to a transport.
+#                     512fc83 is the tip of `origin/cli/boards`.
+#   treadmill-rs   -- Treadmill's wire types and switchboard client.
+#   treadmill-client -- session, profile and job-service WebSocket mechanics.
+#                     9bc2f8f is the tip of `client-library`, which is not yet
+#                     merged to treadmill's `main`.
+#
+# The dependency points one way only: neither tockloader-ng nor treadmill may
+# ever depend on this crate.
 [dependencies]
-treadmill-rs = { workspace = true, features = ["client"] }
-treadmill-client = { workspace = true, features = ["profile", "ws"] }
+tock-proto = { git = "https://github.com/alevy/tockloader-next", rev = "512fc83" }
+treadmill-rs = { git = "https://github.com/treadmill-tb/treadmill", rev = "9bc2f8f", features = [
+  "client",
+] }
+treadmill-client = { git = "https://github.com/treadmill-tb/treadmill", rev = "9bc2f8f", features = [
+  "profile",
+  "ws",
+] }
 
-anyhow = { workspace = true }
-chrono = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
-futures-util = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tock-proto = { workspace = true }
-tokio = { workspace = true, features = [
+anyhow = "1.0.104"
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+futures-util = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2"
+tokio = { version = "1.54.1", default-features = false, features = [
   "rt",
   "rt-multi-thread",
   "io-util",
@@ -34,12 +57,18 @@ tokio = { workspace = true, features = [
   "sync",
   "time",
 ] }
-tokio-tungstenite = { workspace = true }
-toml = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
+tokio-tungstenite = "0.30"
+toml = "1.2.0"
+uuid = { version = "1.29.0", features = ["v4"] }
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile = "3"
 
-[lints]
-workspace = true
+# Inlined from treadmill's workspace lints, which this crate used to inherit.
+[lints.clippy]
+complexity = { level = "deny", priority = -1 }
+type_complexity = "allow"
+result_large_err = "allow"
+too_many_arguments = "allow"
+large_enum_variant = "allow"
+from_str_radix_10 = "allow"
