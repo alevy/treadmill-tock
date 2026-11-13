@@ -36,7 +36,7 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use tock_proto::{Capability, Connection, ErrorKind, OptionSpec, ProtoError, Request, Response};
-use treadmill_client::diagnostics::Silent;
+use treadmill_client::diagnostics::{Diagnostics, Silent};
 use treadmill_client::session::{self, Session};
 use treadmill_tock::agent::render::select_dut;
 use treadmill_tock::relay::Relay;
@@ -161,20 +161,26 @@ impl Transport {
             Err(response) => return response,
         };
 
-        let session = match Session::load(&session::Options::default(), Arc::new(Silent)) {
-            Ok(session) => Arc::new(tokio::sync::Mutex::new(session)),
+        let profile = session::Options::default();
+        let diagnostics: Arc<dyn Diagnostics> = Arc::new(Silent);
+        // This `Session` is the reservation's alone, and is dropped before
+        // the first tunnel opens; each tunnel loads its own (see
+        // [`TunnelFactory`]).
+        let mut session = match Session::load(&profile, Arc::clone(&diagnostics)) {
+            Ok(session) => session,
             Err(error) => {
                 return Response::error(ErrorKind::Device, format!("{error:#}"));
             }
         };
 
-        let reserved = {
-            let session = Arc::clone(&session);
-            self.handle.block_on(async move {
-                let mut guard = session.lock().await;
-                treadmill::reserve(&mut guard, &predicate, image_set, lease, extend_within).await
-            })
-        };
+        let reserved = self.handle.block_on(treadmill::reserve(
+            &mut session,
+            &predicate,
+            image_set,
+            lease,
+            extend_within,
+        ));
+        drop(session);
         let reserved = match reserved {
             Ok(reserved) => reserved,
             Err(error) => return Response::error(ErrorKind::Device, format!("{error:#}")),
@@ -211,7 +217,8 @@ impl Transport {
             }
         }
 
-        let factory = TunnelFactory::new(session, self.handle.clone(), reserved.job_id);
+        let factory =
+            TunnelFactory::new(profile, diagnostics, self.handle.clone(), reserved.job_id);
         self.state = State::Opened(Relay::new(routing, factory, needs));
         Response::Ok
     }

@@ -29,10 +29,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Duration, Utc};
 use tock_proto::{Connection, ProtoError, StreamChannel};
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use treadmill_client::session::Session;
+use treadmill_client::diagnostics::Diagnostics;
+use treadmill_client::session::{self, Session};
 use treadmill_client::wsproxy;
 use treadmill_rs::api::switchboard::client::SwitchboardClient;
 use treadmill_rs::api::switchboard::hosts::HostRequirementsRequest;
@@ -279,30 +279,42 @@ pub fn check_board(spec: &HostSpecLatest, wanted: &str) -> Result<(), BoardMisma
 /// against the wide-area round trip to the switchboard, and it is the same
 /// shape `tml job ws-proxy --listen-addr` already uses in production.
 ///
-/// `session` is shared (`Arc<Mutex<_>>`) because [`wsproxy::run`] needs
-/// `&mut Session` for as long as one tunnel is bridging bytes, and `open` is
-/// called once per capability a session's routing actually uses (see
-/// [`crate::relay::Relay`]) — each such call needs its own mutable borrow of
-/// the same session, taken only while that one tunnel runs. `handle` is a
-/// [`tokio::runtime::Handle`] rather than an owned runtime, since whatever
-/// built this factory already has one running (see Task 7) and spawning
-/// onto it is all `open`'s synchronous caller needs.
+/// **A `Session` per tunnel, never a shared one.** [`wsproxy::run`] needs
+/// `&mut Session` for as long as a tunnel is bridging bytes — which is the
+/// whole session — and `open` is called once per capability a session's
+/// routing actually uses (see [`crate::relay::Relay`]), so an `install`
+/// followed by a `console` has two tunnels live at once. One `Session`
+/// behind a mutex cannot serve both: the first tunnel holds the lock until
+/// it is done and the second blocks on it forever, its `Hello` never
+/// answered and nothing printed. So this holds what a `Session` is made
+/// from rather than a `Session`, and each tunnel loads its own. That
+/// re-reads a small config and state file per tunnel, which costs nothing
+/// at the one or two tunnels a session opens, and it is the only shape in
+/// which no lock can be held across a tunnel's lifetime.
+///
+/// `handle` is a [`tokio::runtime::Handle`] rather than an owned runtime,
+/// since whatever built this factory already has one running (see Task 7)
+/// and spawning onto it is all `open`'s synchronous caller needs.
 pub struct TunnelFactory {
-    session: Arc<Mutex<Session>>,
+    options: session::Options,
+    diagnostics: Arc<dyn Diagnostics>,
     handle: tokio::runtime::Handle,
     job_id: Uuid,
 }
 
 impl TunnelFactory {
     /// A factory that opens tunnels to services announced by `job_id`,
-    /// authenticating as `session` and bridging each one on `handle`.
+    /// authenticating as the profile `options` selects — loaded afresh for
+    /// each tunnel — and bridging each one on `handle`.
     pub fn new(
-        session: Arc<Mutex<Session>>,
+        options: session::Options,
+        diagnostics: Arc<dyn Diagnostics>,
         handle: tokio::runtime::Handle,
         job_id: Uuid,
     ) -> TunnelFactory {
         TunnelFactory {
-            session,
+            options,
+            diagnostics,
             handle,
             job_id,
         }
@@ -315,12 +327,13 @@ impl LinkFactory for TunnelFactory {
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
 
-        let session = Arc::clone(&self.session);
+        let options = self.options.clone();
+        let diagnostics = Arc::clone(&self.diagnostics);
         let job_id = self.job_id;
         let service = transport.service_name();
 
         self.handle.spawn(async move {
-            if let Err(error) = tunnel(listener, session, job_id, service).await {
+            if let Err(error) = tunnel(listener, options, diagnostics, job_id, service).await {
                 eprintln!("tock-transport-treadmill: tunnel for `{service}` ended: {error:#}");
             }
         });
@@ -334,16 +347,21 @@ impl LinkFactory for TunnelFactory {
 /// The async half of [`TunnelFactory::open`]: accept the one connection the
 /// blocking side is about to make on `listener`, then bridge it to `service`
 /// on `job_id` over a WebSocket until either side closes.
+///
+/// The `Session` is this tunnel's own, loaded here. Nothing is shared with
+/// any other tunnel, so nothing can be held across this one's lifetime.
 async fn tunnel(
     listener: TcpListener,
-    session: Arc<Mutex<Session>>,
+    options: session::Options,
+    diagnostics: Arc<dyn Diagnostics>,
     job_id: Uuid,
     service: &'static str,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::from_std(listener)?;
     let (stream, _peer) = listener.accept().await?;
     let (read, write) = stream.into_split();
-    let mut session = session.lock().await;
+    let mut session = Session::load(&options, diagnostics)
+        .context("loading the Treadmill profile for this tunnel")?;
     wsproxy::run(&mut session, job_id, read, write, service, None).await
 }
 
