@@ -13,6 +13,31 @@ path = "src/bin/tml-tock-agent.rs"
 [[bin]]
 name = "tock-transport-treadmill"
 path = "src/bin/tock-transport-treadmill.rs"
+required-features = ["transport"]
+
+# The two binaries have genuinely different needs, and saying so in features
+# is what keeps the in-image agent small. `tml-tock-agent` reads a JSON file
+# and writes config: no switchboard client, no async runtime, no TLS. Built
+# with `--no-default-features` it drops reqwest, rustls and aws-lc-sys
+# entirely -- which is most of the dependency tree, all of the C, and the
+# only thing that made cross-compiling it for the image awkward.
+# Both integration tests drive the transport, so they follow its feature
+# rather than failing to compile when the agent is built alone.
+[[test]]
+name = "transport_handshake"
+required-features = ["transport"]
+
+[[test]]
+name = "tunnel_concurrency"
+required-features = ["transport"]
+
+[features]
+default = ["transport"]
+transport = [
+  "dep:treadmill-client",
+  "dep:tokio",
+  "treadmill-rs/client",
+]
 
 # This crate sits downstream of two projects and upstream of neither, so both
 # arrive as git dependencies pinned to an exact revision. Neither pin is a
@@ -32,10 +57,8 @@ path = "src/bin/tock-transport-treadmill.rs"
 # ever depend on this crate.
 [dependencies]
 tock-proto = { git = "https://github.com/alevy/tockloader-next", rev = "512fc83" }
-treadmill-rs = { git = "https://github.com/treadmill-tb/treadmill", rev = "9bc2f8f", features = [
-  "client",
-] }
-treadmill-client = { git = "https://github.com/treadmill-tb/treadmill", rev = "9bc2f8f", features = [
+treadmill-rs = { git = "https://github.com/treadmill-tb/treadmill", rev = "9bc2f8f" }
+treadmill-client = { git = "https://github.com/treadmill-tb/treadmill", rev = "9bc2f8f", optional = true, features = [
   "profile",
   "ws",
 ] }
@@ -46,7 +69,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2"
-tokio = { version = "1.54.1", default-features = false, features = [
+tokio = { version = "1.54.1", optional = true, default-features = false, features = [
   "rt",
   "rt-multi-thread",
   "io-util",

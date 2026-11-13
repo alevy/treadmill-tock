@@ -36,11 +36,16 @@ base layer installs `tml` and `caddy`:
 |---|---|
 | `tock`, `tock-transport-openocd`, `tock-transport-serial` | tockloader-ng, cross-built for the image's arch |
 | `boards/*.toml` | tockloader-ng's bundled board files |
-| `tml-tock-agent` | this repository, cross-built for the image's arch |
+| `tml-tock-agent` | this repository: `nix build .#tml-tock-agent-aarch64` (or `-x86_64`) |
 
-Whatever assembles the payload has to produce those. Nothing here builds
-them, deliberately: the base layer's pattern for first-party binaries is to
-receive them prebuilt.
+The agent is built by this repository's flake, as a static musl binary with
+the `transport` feature off -- it reads a JSON file and writes config, so it
+needs no switchboard client and no TLS. That is 102 crates instead of 254,
+and no `aws-lc-sys`.
+
+`tock` and its transports still have to come from somewhere: tockloader-ng
+has no nix packaging, so they are cross-built by hand today. Packaging them
+is the remaining half of making this payload reproducible.
 
 ## How it runs
 

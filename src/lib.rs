@@ -20,8 +20,12 @@
 //! human: stderr, because stdout is the protocol carrier.
 
 pub mod agent;
+#[cfg(feature = "transport")]
 pub mod diagnostics;
+#[cfg(feature = "transport")]
 pub mod relay;
+#[cfg(feature = "transport")]
 pub mod reservation;
 pub mod routing;
+#[cfg(feature = "transport")]
 pub mod treadmill;

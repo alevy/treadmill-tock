@@ -49,6 +49,21 @@ through two separate tunnels to two separate job services. That run was
 staged by hand — the layer in `image/` has not itself been built yet, so
 nothing here is packaged.
 
+## Building
+
+```sh
+nix build                        # tock-transport-treadmill, for your machine
+nix build .#tml-tock-agent-aarch64   # static payload for an rpi host image
+nix build .#tml-tock-agent-x86_64    # ... or a qemu one
+nix flake check                  # clippy, rustfmt, tests
+```
+
+The crate has one feature, `transport`, on by default. With it off only
+`tml-tock-agent` builds, and the dependency tree drops from 254 crates to
+102 -- no reqwest, no rustls, no `aws-lc-sys`. That is what the image
+payload uses, and it is why cross-compiling it needs no C toolchain
+gymnastics.
+
 ## Dependencies
 
 Both upstreams are git dependencies pinned to exact revisions, and neither pin
