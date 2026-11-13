@@ -35,8 +35,11 @@ base layer installs `tml` and `caddy`:
 | | From |
 |---|---|
 | `tock`, `tock-transport-openocd`, `tock-transport-serial` | tockloader-ng, cross-built for the image's arch |
-| `boards/*.toml` | tockloader-ng's bundled board files |
 | `tml-tock-agent` | this repository: `nix build .#tml-tock-agent-aarch64` (or `-x86_64`) |
+
+No board files: `tock` compiles its reference set in and reports them as
+`bundled`. `build-image.sh` installs payloads flat by basename anyway, so a
+directory of them would not survive the trip.
 
 The agent is built by this repository's flake, as a static musl binary with
 the `transport` feature off -- it reads a JSON file and writes config, so it

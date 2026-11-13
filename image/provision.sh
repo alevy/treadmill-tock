@@ -19,16 +19,17 @@ for binary in tock tock-transport-openocd tock-transport-serial tml-tock-agent; 
 	install -m 0755 "$TML_PAYLOAD_DIR/$binary" "/usr/local/bin/$binary"
 done
 
-# `tock` resolves a board file by name, so the bundled set has to be on disk
-# where the agent's generated config can name one.
-mkdir -p /usr/local/share/tock/boards
-cp "$TML_PAYLOAD_DIR"/boards/*.toml /usr/local/share/tock/boards/
+# No board files are installed: `tock` compiles its reference set in, and
+# reports them as `bundled`. A board that is not bundled is named by path in
+# the config instead, which is a per-DUT fact the agent would have to write
+# -- not something this layer can anticipate.
 
 # Which `tock` this image ships. A developer's machine resolves its own board
 # file, and a layout that disagrees with this one produces confusing refusals
 # rather than a clear error; recording the version at least lets a mismatch be
 # named. See docs/design.md, "A note on board-file skew".
-"$TML_PAYLOAD_DIR/tock" --version >/etc/tml/tock-version 2>/dev/null ||
+mkdir -p /etc/tml
+tock --version >/etc/tml/tock-version 2>/dev/null ||
 	echo unknown >/etc/tml/tock-version
 
 install -m 0644 "$TML_IMAGE_DIR/tml-tock-setup.service" \
