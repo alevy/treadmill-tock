@@ -1,0 +1,87 @@
+# The Treadmill image layer
+
+A layer in the shape the [`images`][images] repository uses: an
+`image.json` naming a base, and a `provision.sh` that runs inside the guest.
+It lives here rather than there because the image and the tool change
+together — a new transport means a new unit instance, and a change to what
+`tml-tock-agent` writes means a change to what the units read.
+
+[images]: https://github.com/treadmill-tb/treadmill-images
+
+## Installing it
+
+Copy this directory to `images/<family>/tock/` in the images repository and
+add an `image.json` per family, since arch and base differ:
+
+```json
+{ "title": "Raspberry Pi OS 13 (NBD) with Tock board access",
+  "arch": "aarch64", "type": "sd", "base": "../base" }
+```
+
+`image.json.example` is that file with the fields blanked.
+
+## What the base layer already provides
+
+`shared/treadmill-guest/treadmill-guest.sh` installs `tml`, `caddy`,
+`websocat` and `ttyd`, and `images/*/base/install-openocd.sh` builds OpenOCD
+from a pinned upstream commit. **This layer adds no third-party software at
+all** — only the `tock` side, the two units and a udev rule.
+
+## What the payload must contain
+
+`provision.sh` installs five things from `$TML_PAYLOAD_DIR`, the same way the
+base layer installs `tml` and `caddy`:
+
+| | From |
+|---|---|
+| `tock`, `tock-transport-openocd`, `tock-transport-serial` | tockloader-ng, cross-built for the image's arch |
+| `boards/*.toml` | tockloader-ng's bundled board files |
+| `tml-tock-agent` | this repository, cross-built for the image's arch |
+
+Whatever assembles the payload has to produce those. Nothing here builds
+them, deliberately: the base layer's pattern for first-party binaries is to
+receive them prebuilt.
+
+## How it runs
+
+1. `tml-tock-setup.service` runs once at job start. `tml-tock-agent` reads
+   `host-spec.json`, picks the DUT, writes `tock`'s config with this host's
+   wiring, and declares one service per transport the DUT supports.
+2. `tml-tock-broker@openocd` and `@serial` each run a `websocat` that
+   terminates the WebSocket a developer's `tock` opens through the job
+   gateway, and hands the connection to a `tock --transport <name> broker`
+   it spawns.
+
+Both instances are enabled unconditionally. The agent only declares services
+for transports the DUT actually has, so an instance for a transport this
+board lacks announces nothing and costs an idle process.
+
+## Verified against websocat 1.14.2
+
+Two of the three unknowns were checked empirically rather than on hardware.
+The image pins **1.14.1**; these were run against **1.14.2**, so a version
+mismatch is still possible, but both behaviours are long-standing.
+
+1. **`exec:` spawns without a shell.** `exec:sleep --exec-args 120` put
+   `sleep` directly under websocat — `/proc/<pid>/comm` is `sleep`, cmdline
+   `sleep 120`, no shell in between. So the process websocat signals is the
+   one holding the probe. This matters because it is a bug this project
+   already shipped once, in its own listener, and fixed.
+2. **`--binary` preserves short reads as their own frames.** A child writing
+   `AAAA`, pausing, then `BBBB` produced two separate 4-byte binary frames
+   (opcode 2), not one buffered 8-byte frame. A buffering carrier here would
+   hang rather than error, which is the same failure mode as the `splice(2)`
+   short-read bug in this crate's history. websocat also sends a Close frame
+   when the child reaches EOF.
+
+## Still unverified — needs hardware
+
+3. **Probe permissions.** The units run as `tml`, matching the SSH service.
+   `tock broker` reaches a USB debug probe, which needs udev rules granting
+   that user access. `openocd` failing to claim the probe is the most likely
+   first-run failure.
+4. **The carrier end to end.** `websocat` and the developer side's
+   `wsproxy::run` have never been executed against each other — only each
+   against a stand-in. That is the seam where two Critical defects hid behind
+   a green suite during development. The first successful `tock list` against
+   a real host is the test.

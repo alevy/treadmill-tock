@@ -13,7 +13,7 @@
 //! SSH, and it is why this agent is a config generator and not a server:
 //! bridging a socket to a process's stdio is exactly what `websocat`
 //! does, and the lifetimes involved are where the bugs were when we did
-//! it ourselves. See `deploy/` for the units.
+//! it ourselves. See `image/` for the layer.
 
 use std::collections::BTreeMap;
 use std::fs;

@@ -1,0 +1,6 @@
+{
+  "title": "<base image title> with Tock board access",
+  "arch": "aarch64",
+  "type": "sd",
+  "base": "../base"
+}

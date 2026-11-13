@@ -53,5 +53,6 @@ may depend on this crate.
 
 ## Deploying
 
-`deploy/` has the systemd units and what an image needs to install. The
+`image/` is the Treadmill image layer: the systemd units, a udev rule, and
+what the payload must contain. The
 carrier is `websocat`, matching the image's existing SSH service.

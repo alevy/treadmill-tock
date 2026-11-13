@@ -366,7 +366,7 @@ orphaned the broker) and none lived in the protocol.
 `websocat` is a general implementation of exactly that supervision, it is
 already in the image and sha256-pinned per arch, and the image's SSH service
 already uses it in this shape. So the agent stopped being a server. It is now
-a config generator, and the carrier is two systemd units (`deploy/`).
+a config generator, and the carrier is two systemd units (`image/`).
 
 What that trades away, stated plainly: properties the old code said out loud
 become flags. "One broker at a time" — a requirement, since a debug probe
