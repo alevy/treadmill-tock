@@ -32,9 +32,11 @@ pub fn default_command(transport: &str) -> String {
 /// to a freshly spawned `command` until the connection closes, reap the
 /// child, accept again.
 ///
-/// `command` runs through `/bin/sh -c`, so it may be any shell command line
-/// rather than just a bare program name — which is what lets a test
-/// substitute `cat` for `tock --transport <name> broker`.
+/// `command` is whitespace-split into a program and its arguments and
+/// spawned directly — no shell, no quoting, no PATH tricks beyond what
+/// `Command::new` already does. That matters beyond style: the `Child` this
+/// holds must *be* the broker process, not a shell wrapping it, so that a
+/// future "kill the stuck broker" has a pid that actually owns the device.
 ///
 /// Returns only if `listener.accept` itself fails; a connection that ends
 /// badly (the child exits oddly, the splice errors) is logged and the loop
@@ -99,7 +101,11 @@ fn handle_connection(stream: TcpStream, command: &str) -> io::Result<()> {
 fn pump(mut src: impl Read, mut dst: impl Write) -> io::Result<()> {
     let mut buf = [0u8; 8192];
     loop {
-        let n = src.read(&mut buf)?;
+        let n = match src.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
         if n == 0 {
             return Ok(());
         }
@@ -107,10 +113,19 @@ fn pump(mut src: impl Read, mut dst: impl Write) -> io::Result<()> {
     }
 }
 
+/// Splits `command` on whitespace into a program and its arguments, and
+/// spawns it directly with stdio piped. No shell is involved: the first
+/// token is looked up on `PATH` by `Command::new` itself, exactly as a
+/// shell would, but without a shell process sitting between `serve` and
+/// the real child.
 fn spawn(command: &str) -> io::Result<Child> {
-    Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
+    let mut words = command.split_whitespace();
+    let program = words
+        .next()
+        .ok_or_else(|| io::Error::other("the command to spawn is empty"))?;
+
+    Command::new(program)
+        .args(words)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

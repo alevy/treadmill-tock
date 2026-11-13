@@ -78,8 +78,13 @@ struct ServeArgs {
     #[arg(long)]
     listen: SocketAddr,
 
-    /// Overrides the command spawned for each connection, run through
-    /// `/bin/sh -c`. Defaults to `tock --transport <name> broker`.
+    /// Overrides the command spawned for each connection. Defaults to
+    /// `tock --transport <name> broker`.
+    ///
+    /// This is a test seam (so a test can substitute e.g. `cat` for `tock`),
+    /// not a general command runner: it is whitespace-split into a program
+    /// and arguments and spawned directly, with no shell involved — no
+    /// quoting, no pipes, no globs, no `$VAR` expansion.
     #[arg(long)]
     command: Option<String>,
 }

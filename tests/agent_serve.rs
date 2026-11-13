@@ -3,8 +3,8 @@
 //! the socket come back out again, via `--command cat` standing in for
 //! `tock --transport <name> broker`. No `tock` binary and no hardware is
 //! needed for this: `cat` echoes whatever it reads, which is exactly what
-//! the splice needs to make observable. (`--command` runs through `/bin/sh
-//! -c`, resolving `cat` from `PATH` — this host has no `/bin/cat`.)
+//! the splice needs to make observable. (`--command` is spawned directly,
+//! no shell, resolving `cat` from `PATH` — this host has no `/bin/cat`.)
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
