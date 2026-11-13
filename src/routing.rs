@@ -83,6 +83,12 @@ pub enum RoutingError {
     /// is available to serve anything.
     #[error("DUT `{dut}` has no debug probe or console wired to it; tock has no transport to use")]
     NoTransports { dut: String },
+    /// An override named a capability that does not exist, e.g. a typo like
+    /// `consoel`. Checked before the transport name: a caller who misspelled
+    /// the capability should hear about that, not about the transport they
+    /// spelled correctly.
+    #[error("override names unknown capability `{capability}`")]
+    UnknownCapability { capability: String },
     /// An override named a transport that does not exist.
     #[error("override for capability `{capability}` names unknown transport `{name}`")]
     UnknownTransport { capability: String, name: String },
@@ -134,6 +140,11 @@ pub fn resolve(dut: &DutV2, overrides: &BTreeMap<String, String>) -> Result<Rout
     }
 
     for (capability, name) in overrides {
+        if !is_known_capability(capability) {
+            return Err(RoutingError::UnknownCapability {
+                capability: capability.clone(),
+            });
+        }
         let transport =
             RemoteTransport::by_name(name).ok_or_else(|| RoutingError::UnknownTransport {
                 capability: capability.clone(),
@@ -149,6 +160,26 @@ pub fn resolve(dut: &DutV2, overrides: &BTreeMap<String, String>) -> Result<Rout
     }
 
     Ok(Routing(routes))
+}
+
+/// Whether `name` is a capability `tock-proto` actually has a story for, so
+/// an override naming anything else -- `consoel` for a typoed `console` --
+/// is refused by name rather than silently doing nothing.
+///
+/// Derived from [`Capability::name`] itself rather than a hardcoded list, so
+/// it cannot drift from what the wire protocol actually calls each
+/// capability. `Vendor` is included via an arbitrary inner value: its wire
+/// name does not depend on which vendor operation it carries.
+fn is_known_capability(name: &str) -> bool {
+    [
+        Capability::MemoryRead,
+        Capability::MemoryWrite,
+        Capability::Reset,
+        Capability::Console,
+        Capability::Vendor(String::new()),
+    ]
+    .iter()
+    .any(|capability| capability.name() == name)
 }
 
 impl std::fmt::Display for RemoteTransport {
@@ -251,6 +282,19 @@ mod tests {
             err,
             RoutingError::NotAvailable { capability, transport }
                 if capability == "console" && transport == RemoteTransport::Serial
+        ));
+    }
+
+    #[test]
+    fn override_naming_an_unknown_capability_is_refused() {
+        // `--opt route.consoel=openocd`: a typo of `console`. Must be
+        // refused by name, not silently ignored.
+        let overrides = BTreeMap::from([("consoel".to_string(), "openocd".to_string())]);
+        let err = resolve(&dut_with_debug_and_console(), &overrides).unwrap_err();
+        assert!(matches!(
+            err,
+            RoutingError::UnknownCapability { capability }
+                if capability == "consoel"
         ));
     }
 
