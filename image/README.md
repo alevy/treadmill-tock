@@ -45,6 +45,14 @@ treadmill-guest.sh -> ../../../shared/treadmill-guest/treadmill-guest.sh
 
 Those live there because they belong to the build system, not to this tool.
 
+## Building it is a cross build
+
+The image is aarch64 and provisioning runs the guest's package manager in a
+chroot, so it needs an aarch64 userland to run under. Treadmill's image CI
+builds on native ARM runners and never emulates. Locally on x86_64,
+`build-image.sh` refuses up front unless qemu user emulation is registered —
+on NixOS, `boot.binfmt.emulatedSystems = [ "aarch64-linux" ];` and a rebuild.
+
 ## The payload
 
 ```sh
