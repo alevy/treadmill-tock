@@ -1,57 +1,60 @@
-# The Treadmill image layer
+# The Treadmill image
 
-A layer in the shape the [`images`][images] repository uses: an
-`image.json` naming a base, and a `provision.sh` that runs inside the guest.
-It lives here rather than there because the image and the tool change
-together — a new transport means a new unit instance, and a change to what
-`tml-tock-agent` writes means a change to what the units read.
+A single-purpose image: a Raspberry Pi 5 host that carries the `tock`
+protocol to the board wired to it, and does nothing else. It lives here
+rather than in the [`images`][images] repository because it changes with the
+tool — a new transport is a new unit instance, and a change to what
+`tml-tock-agent` writes is a change to what the units read.
 
 [images]: https://github.com/treadmill-tb/treadmill-images
 
+## Not a layer on the existing base
+
+The published `raspberrypios-13/base` is a developer workstation: compilers
+for three architectures, gdb, editors, tmux, a web terminal, a Rust
+toolchain — 47 apt packages before anything Treadmill-specific. None of it
+is reachable from a protocol relay, so this is a **root image** that installs
+four:
+
+```
+ca-certificates  dbus  nbd-client  systemd-resolved
+```
+
+`ca-certificates` is how the Treadmill daemon reaches the switchboard, `dbus`
+is how it is reachable, and the other two are how the root file system
+arrives and resolves. OpenOCD's build dependencies are installed and then
+purged by the shared `install-openocd.sh`, so naming one here would only make
+it permanent.
+
+The shared guest layer is reused in full, with its optional pieces off:
+`with_ttyd=no with_ssh=no with_rustup=no`. **SSH is the one real loss** — it
+is how you look at a host that is misbehaving — and it is a single `yes` away
+when a deployment decides it wants it back.
+
 ## Installing it
 
-Copy this directory to `images/<family>/tock/` in the images repository and
-add an `image.json` per family, since arch and base differ:
+Copy these files into `images/raspberrypios-13/tock-bridge/` in the images
+repository, which adds the symlinks into `shared/` that `provision.sh`
+expects:
 
-```json
-{ "title": "Raspberry Pi OS 13 (NBD) with Tock board access",
-  "arch": "aarch64", "type": "sd", "base": "../base" }
+```
+expandroot.sh      -> ../../../shared/treadmill-guest/expandroot.sh
+install-openocd.sh -> ../../../shared/openocd/install-openocd.sh
+treadmill-guest.sh -> ../../../shared/treadmill-guest/treadmill-guest.sh
 ```
 
-`image.json.example` is that file with the fields blanked.
+Those live there because they belong to the build system, not to this tool.
 
-## What the base layer already provides
-
-`shared/treadmill-guest/treadmill-guest.sh` installs `tml`, `caddy`,
-`websocat` and `ttyd`, and `images/*/base/install-openocd.sh` builds OpenOCD
-from a pinned upstream commit. **This layer adds no third-party software at
-all** — only the `tock` side, the two units and a udev rule.
-
-## What the payload must contain
-
-One command:
+## The payload
 
 ```sh
-nix build .#payload-aarch64   # or .#payload-x86_64
+nix build .#payload-aarch64
 ```
 
-That produces every binary the layer installs, statically linked for the
-guest: `tock` and all its subcommands and transports (built from
-tockloader-ng, which ships no nix packaging of its own -- its source is just
-an input), plus `tml-tock-agent` from this repository.
-
-`build-image.sh` installs payloads flat by basename and takes files rather
-than directories, so pass them one at a time:
-
-```sh
-payload=$(nix build .#payload-aarch64 --no-link --print-out-paths)
-args=(); for f in "$payload"/bin/*; do args+=(--payload "$f"); done
-build/build-chain.sh --image images/raspberrypios-13/tock -o out/… "${args[@]}"
-```
-
-`tock` and `tock-proto` are pinned to the same tockloader-ng revision this
-crate depends on, so the protocol the image speaks and the protocol the
-developer's transport was compiled against cannot drift apart.
+Four binaries reach the image: `tock` for its `broker` subcommand, one
+transport per capability, and `tml-tock-agent`. The payload carries `tock`'s
+other subcommands too — they are a debugging convenience for someone logged
+in, and nothing can log in here, so `provision.sh` installs only the four.
 
 ## How it runs
 
@@ -62,11 +65,6 @@ developer's transport was compiled against cannot drift apart.
    terminates the WebSocket a developer's `tock` opens through the job
    gateway, and hands the connection to a `tock --transport <name> broker`
    it spawns.
-
-Both instances are enabled unconditionally. The agent only declares services
-for transports the DUT actually has, so an instance for a transport this
-board lacks announces nothing and costs an idle process.
-
 ## Verified against websocat 1.14.2
 
 Two of the three unknowns were checked empirically rather than on hardware.

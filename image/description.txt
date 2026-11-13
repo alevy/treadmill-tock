@@ -1,0 +1,1 @@
+A Raspberry Pi 5 host that does one thing: let a developer drive the Tock board wired to it from their own machine, using the ordinary `tock` commands. No web terminal, no toolchain, no editors -- only what carries the protocol to the board.

@@ -87,6 +87,8 @@ may depend on this crate.
 
 ## Deploying
 
-`image/` is the Treadmill image layer: the systemd units, a udev rule, and
-what the payload must contain. The
+`image/` is the Treadmill image: a single-purpose Raspberry Pi 5 host that
+carries the protocol to the board and does nothing else. Four apt packages
+rather than the 47 of the existing developer-workstation base, no web
+terminal, no toolchain, no SSH. The
 carrier is `websocat`, matching the image's existing SSH service.
