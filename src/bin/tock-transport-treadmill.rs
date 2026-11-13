@@ -36,9 +36,10 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use tock_proto::{Capability, Connection, ErrorKind, OptionSpec, ProtoError, Request, Response};
-use treadmill_client::diagnostics::{Diagnostics, Silent};
+use treadmill_client::diagnostics::Diagnostics;
 use treadmill_client::session::{self, Session};
 use treadmill_tock::agent::render::select_dut;
+use treadmill_tock::diagnostics::Stderr;
 use treadmill_tock::relay::Relay;
 use treadmill_tock::reservation;
 use treadmill_tock::routing::{self, RemoteTransport};
@@ -162,7 +163,13 @@ impl Transport {
         };
 
         let profile = session::Options::default();
-        let diagnostics: Arc<dyn Diagnostics> = Arc::new(Silent);
+        // Stderr, not `Silent` and never stdout: stdout carries the
+        // `tock-proto` frames this process exists to serve, and a
+        // reservation that takes minutes or cannot be placed at all has to
+        // be able to say so.
+        let reporter = Arc::new(Stderr::from_env());
+        let diagnostics: Arc<dyn Diagnostics> = reporter.clone();
+        let progress = |message: &str| reporter.note(message);
         // This `Session` is the reservation's alone, and is dropped before
         // the first tunnel opens; each tunnel loads its own (see
         // [`TunnelFactory`]).
@@ -179,11 +186,22 @@ impl Transport {
             image_set,
             lease,
             extend_within,
+            &progress,
         ));
         drop(session);
         let reserved = match reserved {
             Ok(reserved) => reserved,
-            Err(error) => return Response::error(ErrorKind::Device, format!("{error:#}")),
+            Err(error) => {
+                // A reservation nothing in the fleet can place is the
+                // caller's to fix -- a board name, a permission, a
+                // predicate -- and not a device failure, so it is refused
+                // as a selection with the report's own account of why.
+                let kind = match error.downcast_ref::<reservation::Unplaceable>() {
+                    Some(_) => ErrorKind::Selection,
+                    None => ErrorKind::Device,
+                };
+                return Response::error(kind, format!("{error:#}"));
+            }
         };
 
         if let Err(error) = treadmill::check_board(&reserved.spec, &board) {

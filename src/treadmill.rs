@@ -53,6 +53,20 @@ use crate::routing::RemoteTransport;
 /// throughput knob.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long a job may take to become ready before the wait gives up.
+///
+/// A cold reservation is an enqueue, a scheduling pass, a host booting and
+/// a probe attaching, so this is generous. What it is not is unbounded: a
+/// job that cannot be scheduled — the fleet is full, the one matching host
+/// is wedged — would otherwise leave the user with no output and no return,
+/// which is the one outcome the design forbids outright.
+const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// How often, at most, the wait says what it is still waiting for. A
+/// change of state is reported as soon as it is seen; this bounds the
+/// silence when nothing changes.
+const NOTE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// The outcome of [`reserve`]: a job placed on a host, and that host's own
 /// description.
 #[derive(Debug, Clone)]
@@ -85,6 +99,7 @@ pub async fn reserve(
     image_set: Uuid,
     lease: Duration,
     extend_within: Duration,
+    progress: &dyn Fn(&str),
 ) -> Result<Reserved> {
     let client = session.authenticated_client()?;
 
@@ -105,6 +120,9 @@ pub async fn reserve(
 
     let job_id = match reservation::choose(&jobs, &report, Utc::now(), extend_within) {
         Decision::Reuse { job_id, extend } => {
+            progress(&format!(
+                "reusing job {job_id}, which already holds a matching host"
+            ));
             if extend {
                 client
                     .update_job(
@@ -121,6 +139,16 @@ pub async fn reserve(
             job_id
         }
         Decision::Create => {
+            // Refused here rather than enqueued and waited on: a job whose
+            // predicate nothing can satisfy is accepted by the switchboard
+            // and then sits queued until the fleet changes, which from a
+            // prompt is indistinguishable from a hang. The report that
+            // comes back from the match says exactly why, and saying so now
+            // costs the user nothing and the fleet nothing.
+            if let Some(reason) = reservation::unplaceable(&report, predicate) {
+                return Err(anyhow::Error::new(reason));
+            }
+            progress("no held job serves this board; enqueuing one");
             let enqueued = client
                 .enqueue_job(&JobRequest {
                     init_spec: JobInitSpec::ImageSet {
@@ -138,11 +166,23 @@ pub async fn reserve(
                 })
                 .await
                 .context("enqueuing a job")?;
+            // Checked again against the enqueue's own report: the fleet can
+            // change between the two calls, and this one is what the
+            // scheduler actually saw. The job exists by now, so the refusal
+            // says how to get rid of it.
+            if let Some(reason) = reservation::unplaceable(&enqueued.host_requirements, predicate) {
+                return Err(anyhow::Error::new(reservation::Unplaceable(format!(
+                    "{reason}\n  job {} was accepted and will sit queued; \
+                     release it with `tml job cancel {}`",
+                    enqueued.job_id, enqueued.job_id
+                ))));
+            }
+            progress(&format!("enqueued job {}", enqueued.job_id));
             enqueued.job_id
         }
     };
 
-    wait_until_ready(&client, job_id).await?;
+    wait_until_ready(&client, job_id, progress).await?;
 
     let environment = client
         .get_job_environment(job_id)
@@ -185,6 +225,10 @@ pub enum PollStep {
     /// The job ended, or is ending, without ever becoming ready. Waiting
     /// longer would only hang, so this is reported as a failure.
     Failed,
+    /// The job is still coming up, but has been for too long. Reported as
+    /// a failure for the same reason `Failed` is: more waiting would be a
+    /// hang, and a hang says nothing.
+    TimedOut,
 }
 
 /// The pure decision at the heart of [`wait_until_ready`]'s poll loop.
@@ -196,21 +240,73 @@ pub fn poll_step(state: JobState) -> PollStep {
     }
 }
 
-/// Polls `GET /jobs/{id}` until [`poll_step`] says `Ready`, sleeping
-/// [`POLL_INTERVAL`] between polls. The untestable I/O shell around
-/// `poll_step`'s pure decision.
-async fn wait_until_ready(client: &SwitchboardClient, job_id: Uuid) -> Result<()> {
+/// [`poll_step`]'s decision, plus the one the clock makes: a job that is
+/// not up yet and has not been up for longer than `timeout` is given up on.
+///
+/// The clock only ever decides about a job that is still coming up. A job
+/// that has become `Ready` is ready however long it took, and one that has
+/// ended has ended; neither is reconsidered for being slow.
+pub fn wait_step(
+    state: JobState,
+    waited: std::time::Duration,
+    timeout: std::time::Duration,
+) -> PollStep {
+    match poll_step(state) {
+        PollStep::Wait if waited > timeout => PollStep::TimedOut,
+        step => step,
+    }
+}
+
+/// Polls `GET /jobs/{id}` until [`wait_step`] says `Ready`, sleeping
+/// [`POLL_INTERVAL`] between polls and saying what it is waiting for as it
+/// goes. The untestable I/O shell around `wait_step`'s pure decision.
+///
+/// `progress` is told of every state change and, failing that, of the wait
+/// itself every [`NOTE_INTERVAL`]: a reservation that is slowly coming up
+/// and one that is wedged look identical from a prompt otherwise.
+async fn wait_until_ready(
+    client: &SwitchboardClient,
+    job_id: Uuid,
+    progress: &dyn Fn(&str),
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let mut reported: Option<JobState> = None;
+    let mut last_note = started;
     loop {
         let job = client
             .get_job(job_id)
             .await
             .with_context(|| format!("polling job {job_id}"))?;
-        match poll_step(job.state) {
-            PollStep::Ready => return Ok(()),
-            PollStep::Wait => tokio::time::sleep(POLL_INTERVAL).await,
+        let waited = started.elapsed();
+        match wait_step(job.state, waited, READY_TIMEOUT) {
+            PollStep::Ready => {
+                if reported.is_some() {
+                    progress(&format!("job {job_id} is ready ({}s)", waited.as_secs()));
+                }
+                return Ok(());
+            }
+            PollStep::Wait => {
+                if reported != Some(job.state) || last_note.elapsed() >= NOTE_INTERVAL {
+                    progress(&format!(
+                        "job {job_id} is {:?}, waiting for it to be ready ({}s)",
+                        job.state,
+                        waited.as_secs()
+                    ));
+                    reported = Some(job.state);
+                    last_note = std::time::Instant::now();
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
             PollStep::Failed => bail!(
                 "job {job_id} ended before it became ready (state: {:?})",
                 job.state
+            ),
+            PollStep::TimedOut => bail!(
+                "job {job_id} was still {:?} after {}s, so it is not being \
+                 scheduled; `tml job status {job_id}` says what it is waiting \
+                 for, and `tml job cancel {job_id}` releases it",
+                job.state,
+                waited.as_secs()
             ),
         }
     }
@@ -458,5 +554,45 @@ mod tests {
     #[test]
     fn a_terminal_job_state_stops_the_wait() {
         assert_eq!(poll_step(JobState::Finalized), PollStep::Failed);
+    }
+
+    #[test]
+    fn a_job_that_never_becomes_ready_stops_at_the_timeout() {
+        // Without this the poll loop is unbounded: a job that can never be
+        // scheduled leaves the user with no output and no return.
+        assert_eq!(
+            wait_step(
+                JobState::Queued,
+                std::time::Duration::from_secs(601),
+                std::time::Duration::from_secs(600),
+            ),
+            PollStep::TimedOut
+        );
+    }
+
+    #[test]
+    fn a_job_still_within_the_timeout_keeps_waiting() {
+        assert_eq!(
+            wait_step(
+                JobState::Initializing,
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(600),
+            ),
+            PollStep::Wait
+        );
+    }
+
+    #[test]
+    fn a_job_that_became_ready_is_ready_even_past_the_timeout() {
+        // The clock only decides what to do about a job that is *not* yet
+        // up; one that is must never be thrown away for being slow.
+        assert_eq!(
+            wait_step(
+                JobState::Ready,
+                std::time::Duration::from_secs(601),
+                std::time::Duration::from_secs(600),
+            ),
+            PollStep::Ready
+        );
     }
 }
