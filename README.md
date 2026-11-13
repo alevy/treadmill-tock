@@ -30,13 +30,24 @@ trusting the surrounding prose.
 
 ## Status
 
-Experimental, and **not yet verified against real hardware.** The two ends of
-the carrier have never been executed against each other: `serve` is tested
-against a WebSocket client and the developer side against the real gateway,
-but never one against the other. That is precisely the seam where two
-defects hid behind a green test suite during development. The first
-successful `tock list` against a fleet is the real test — see the manual
-verification section of [`docs/implementation-plan.md`](docs/implementation-plan.md).
+Experimental, but **proven end to end against real hardware.** On 2026-11-13
+this flashed and listed an app on an nRF52840DK held in a Treadmill rack
+across the country:
+
+```
+$ tock --board nrf52840dk --transport treadmill install blink.tab
+install `blink` at 0x40000 (8192 bytes)
+did write 2552 byte(s) in 1 run(s)              # 3.8s wall clock
+
+$ tock --board nrf52840dk --transport treadmill list
+Apps:
+blink                0x00040000     8192 bytes  # 3.1s, reservation reused
+```
+
+Both routes were exercised: memory over `openocd`, console over `serial`,
+through two separate tunnels to two separate job services. That run was
+staged by hand — the layer in `image/` has not itself been built yet, so
+nothing here is packaged.
 
 ## Dependencies
 
