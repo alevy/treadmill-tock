@@ -9,8 +9,10 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+
+use tokio::net::TcpListener;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -92,15 +94,23 @@ struct ServeArgs {
 fn main() -> Result<()> {
     match Cli::parse().command {
         AgentCommand::Setup(args) => setup(&args),
-        AgentCommand::Serve(args) => run_serve(&args),
+        // `serve` is a WebSocket server (see
+        // `treadmill_tock::agent::serve`), so it needs a runtime; `setup`
+        // is a few file reads and writes and stays blocking.
+        AgentCommand::Serve(args) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("Starting the async runtime")?
+            .block_on(run_serve(&args)),
     }
 }
 
 /// Binds the listener, reports the bound address on stdout (so a caller
 /// that asked for an ephemeral port can learn which one it got), then
 /// serves connections forever.
-fn run_serve(args: &ServeArgs) -> Result<()> {
+async fn run_serve(args: &ServeArgs) -> Result<()> {
     let listener = TcpListener::bind(args.listen)
+        .await
         .with_context(|| format!("Binding the listener to {}", args.listen))?;
     let local_addr = listener
         .local_addr()
@@ -114,7 +124,9 @@ fn run_serve(args: &ServeArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| default_command(&args.transport));
 
-    serve(listener, &command).context("Serving connections")
+    serve(listener, &command)
+        .await
+        .context("Serving connections")
 }
 
 /// The fixed loopback port each transport's listener is expected to bind,
