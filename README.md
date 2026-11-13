@@ -52,11 +52,19 @@ nothing here is packaged.
 ## Building
 
 ```sh
-nix build                        # tock-transport-treadmill, for your machine
+nix build                            # tock-transport-treadmill, for your machine
 nix build .#tml-tock-agent-aarch64   # static payload for an rpi host image
 nix build .#tml-tock-agent-x86_64    # ... or a qemu one
-nix flake check                  # clippy, rustfmt, tests
+nix flake check                      # tests, clippy, rustfmt
 ```
+
+`package.nix` is a plain `callPackage` derivation with nixpkgs' own
+`buildRustPackage`, so it can be dropped into an overlay or another flake
+without taking this one as an input. The cross payloads are
+`pkgsCross.<target>.callPackage` of the same file.
+
+The three git dependencies need a hash each in `cargoLock.outputHashes`.
+When a pin moves, `nix build` prints the hash it got; paste it in.
 
 The crate has one feature, `transport`, on by default. With it off only
 `tml-tock-agent` builds, and the dependency tree drops from 254 crates to
