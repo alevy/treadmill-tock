@@ -46,12 +46,8 @@ systemctl enable tml-tock-setup.service
 systemctl enable tml-tock-broker@openocd.service
 systemctl enable tml-tock-broker@serial.service
 
-# The brokers run as `tml` and have to claim a USB debug probe. Without this
-# the first flash fails inside OpenOCD, which is the most likely first-run
-# failure on a new host.
-cat >/etc/udev/rules.d/60-tml-tock-probes.rules <<'UDEV'
-# SEGGER J-Link (onboard on the nRF52840DK).
-SUBSYSTEM=="usb", ATTR{idVendor}=="1366", MODE="0660", GROUP="tml"
-# Raspberry Pi Debug Probe, and any other CMSIS-DAP probe from that vendor.
-SUBSYSTEM=="usb", ATTR{idVendor}=="2e8a", MODE="0660", GROUP="tml"
-UDEV
+# No udev rule here, deliberately. The base image already puts `tml` in
+# `plugdev` and `dialout`, and on a live host that was enough for OpenOCD to
+# claim a SEGGER J-Link as `tml`. A rule was written here first and removed
+# once it proved unnecessary; if a probe family turns up that the base
+# image's groups do not cover, this is where its rule goes.

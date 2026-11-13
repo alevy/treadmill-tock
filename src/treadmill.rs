@@ -36,9 +36,10 @@ use treadmill_client::session::{self, Session};
 use treadmill_client::wsproxy;
 use treadmill_rs::api::switchboard::client::SwitchboardClient;
 use treadmill_rs::api::switchboard::hosts::HostRequirementsRequest;
+use treadmill_rs::api::switchboard::hosts::SpecDocument;
 use treadmill_rs::api::switchboard::jobs::{
-    JobEnvironment, JobLeaseExpiryAction, JobListQuery, JobListState, JobSummary, LeaseSpec,
-    RestartPolicy, UpdateJobRequest,
+    JobLeaseExpiryAction, JobListQuery, JobListState, JobSummary, LeaseSpec, RestartPolicy,
+    UpdateJobRequest,
 };
 use treadmill_rs::api::switchboard::{JobInitSpec, JobRequest, JobState};
 use treadmill_rs::host_spec::{HostSpec, HostSpecLatest};
@@ -188,14 +189,26 @@ pub async fn reserve(
 
     wait_until_ready(&client, job_id, progress).await?;
 
-    let environment = client
-        .get_job_environment(job_id)
+    // The spec comes from the *host*, not from the job's environment.
+    // `GET /jobs/{id}/environment` is job-scoped -- it exists for a job to
+    // ask about itself, and authenticates a job token, not the session
+    // token a developer holds. Asking it as a user gets a flat
+    // "unauthorized", which is what a live run turned up and no mocked test
+    // could have.
+    let host_id = client
+        .get_job(job_id)
         .await
-        .with_context(|| format!("reading the environment for job {job_id}"))?;
+        .with_context(|| format!("reading job {job_id} to find the host it holds"))?
+        .dispatched_on_host_id
+        .ok_or_else(|| anyhow!("job {job_id} is ready but reports no host"))?;
+    let host = client
+        .get_host(host_id)
+        .await
+        .with_context(|| format!("reading the spec of host {host_id}"))?;
 
     Ok(Reserved {
         job_id,
-        spec: host_spec_of(&environment)?,
+        spec: host_spec_of(host_id, host.spec)?,
     })
 }
 
@@ -323,17 +336,13 @@ async fn wait_until_ready(
 /// The host spec a job's environment carries, upgraded to the latest
 /// version.
 ///
-/// `JobEnvironment::host_spec` is `None` for a host that was never described
-/// (Review Focus 3) — refused by name here rather than unwrapped.
-fn host_spec_of(environment: &JobEnvironment) -> Result<HostSpecLatest> {
-    let document = environment.host_spec.clone().ok_or_else(|| {
-        anyhow!(
-            "host {} has no spec on file; it was never described",
-            environment.host_id
-        )
-    })?;
+/// `HostInfo::spec` is `None` for a host that was never described (Review
+/// Focus 3) — refused by name here rather than unwrapped.
+fn host_spec_of(host_id: Uuid, document: Option<SpecDocument>) -> Result<HostSpecLatest> {
+    let document = document
+        .ok_or_else(|| anyhow!("host {host_id} has no spec on file; it was never described"))?;
     let spec: HostSpec = serde_json::from_value(serde_json::Value::Object(document))
-        .with_context(|| format!("parsing the spec for host {}", environment.host_id))?;
+        .with_context(|| format!("parsing the spec for host {host_id}"))?;
     Ok(spec.into_latest())
 }
 
@@ -476,7 +485,6 @@ mod tests {
     use uuid::Uuid;
 
     use treadmill_rs::api::switchboard::JobState;
-    use treadmill_rs::api::switchboard::jobs::JobEnvironment;
     use treadmill_rs::host_spec::{
         DutV2, HostSpecLatest, HostSpecV2, Platform, Resources, SpecVersionV2,
     };
@@ -543,14 +551,7 @@ mod tests {
     #[test]
     fn a_host_with_no_spec_is_refused() {
         let host_id = Uuid::new_v4();
-        let env = JobEnvironment {
-            host_id,
-            host_spec: None,
-            gateway: None,
-            parameters: Default::default(),
-        };
-
-        let err = host_spec_of(&env).unwrap_err();
+        let err = host_spec_of(host_id, None).unwrap_err();
 
         let message = err.to_string();
         assert!(
