@@ -12,10 +12,18 @@ set -eu
 : "${TML_IMAGE_DIR:?}"
 : "${TML_PAYLOAD_DIR:?}"
 
-# First-party binaries arrive prebuilt in the payload, as `tml` and `caddy`
-# do in the base layer. `tock` and its transports come from tockloader-ng;
-# `tml-tock-agent` from this repository, cross-built for $TML_ARCH.
-for binary in tock tock-transport-openocd tock-transport-serial tml-tock-agent; do
+# Binaries arrive prebuilt in the payload, as `tml` and `caddy` do in the
+# base layer. `nix build .#payload-<arch>` in the treadmill-tock repository
+# produces all of them together.
+#
+# Every `tock` subcommand, not just the three the carrier needs: running
+# `tock list` over SSH on the host is how you tell a broken carrier from a
+# broken board, and `tock` alone cannot do it -- subcommands are separate
+# executables it finds on PATH.
+for binary in \
+	tock tock-console tock-install tock-list tock-uninstall \
+	tock-transport-file tock-transport-openocd tock-transport-serial \
+	tml-tock-agent; do
 	install -m 0755 "$TML_PAYLOAD_DIR/$binary" "/usr/local/bin/$binary"
 done
 

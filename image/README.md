@@ -29,26 +29,29 @@ all** — only the `tock` side, the two units and a udev rule.
 
 ## What the payload must contain
 
-`provision.sh` installs five things from `$TML_PAYLOAD_DIR`, the same way the
-base layer installs `tml` and `caddy`:
+One command:
 
-| | From |
-|---|---|
-| `tock`, `tock-transport-openocd`, `tock-transport-serial` | tockloader-ng, cross-built for the image's arch |
-| `tml-tock-agent` | this repository: `nix build .#tml-tock-agent-aarch64` (or `-x86_64`) |
+```sh
+nix build .#payload-aarch64   # or .#payload-x86_64
+```
 
-No board files: `tock` compiles its reference set in and reports them as
-`bundled`. `build-image.sh` installs payloads flat by basename anyway, so a
-directory of them would not survive the trip.
+That produces every binary the layer installs, statically linked for the
+guest: `tock` and all its subcommands and transports (built from
+tockloader-ng, which ships no nix packaging of its own -- its source is just
+an input), plus `tml-tock-agent` from this repository.
 
-The agent is built by this repository's flake, as a static musl binary with
-the `transport` feature off -- it reads a JSON file and writes config, so it
-needs no switchboard client and no TLS. That is 102 crates instead of 254,
-and no `aws-lc-sys`.
+`build-image.sh` installs payloads flat by basename and takes files rather
+than directories, so pass them one at a time:
 
-`tock` and its transports still have to come from somewhere: tockloader-ng
-has no nix packaging, so they are cross-built by hand today. Packaging them
-is the remaining half of making this payload reproducible.
+```sh
+payload=$(nix build .#payload-aarch64 --no-link --print-out-paths)
+args=(); for f in "$payload"/bin/*; do args+=(--payload "$f"); done
+build/build-chain.sh --image images/raspberrypios-13/tock -o out/… "${args[@]}"
+```
+
+`tock` and `tock-proto` are pinned to the same tockloader-ng revision this
+crate depends on, so the protocol the image speaks and the protocol the
+developer's transport was compiled against cannot drift apart.
 
 ## How it runs
 
