@@ -50,3 +50,8 @@ may depend on this crate.
 
 [treadmill]: https://github.com/treadmill-tb/treadmill
 [tockloader]: https://github.com/alevy/tockloader-next
+
+## Deploying
+
+`deploy/` has the systemd units and what an image needs to install. The
+carrier is `websocat`, matching the image's existing SSH service.

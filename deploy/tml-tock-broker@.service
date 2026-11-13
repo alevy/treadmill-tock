@@ -1,0 +1,32 @@
+# One instance per tock transport: tml-tock-broker@openocd.service,
+# tml-tock-broker@serial.service. %i is the transport name, which is both
+# the socket directory's suffix and the argument tock is pinned to.
+#
+# websocat terminates the WebSocket the developer's end opens through the
+# job gateway and hands the connection to a freshly spawned broker. That is
+# the whole carrier: nothing in tml-tock-agent moves bytes.
+#
+# `--exit-on-eof` plus `Restart=` is what serialises brokers. One connection
+# at a time is a requirement, not a simplification: a tock broker attaches
+# to a debug probe a second process could not share.
+[Unit]
+After=network.target tml-tock-setup.service
+Requires=tml-tock-setup.service
+
+[Service]
+User=tml
+Group=tml
+RuntimeDirectory=tml-tock-%i
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/bin/websocat --binary --exit-on-eof \
+    ws-u:unix-l:/run/tml-tock-%i/broker.sock \
+    exec:tock --exec-args --transport %i broker
+Restart=always
+# Deliberately 0, where the image's SSH service uses 5s. An ssh client
+# retries a refused connection; tock-transport-treadmill does not, and a
+# developer runs `tock flash` then `tock console` back to back. A restart
+# gap here is a failed command, not a blip.
+RestartSec=0
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+# Writes tock's config for the DUT wired to this host, and declares one
+# service per transport that DUT supports. Must finish before Treadmill's
+# in-image daemon reads /etc/tml/services.d, or the services go unannounced
+# for the life of the job.
+[Unit]
+After=network.target
+# Order this before whatever unit runs Treadmill's in-image daemon. Named
+# here rather than assumed, because getting it wrong fails silently: the
+# daemon simply sees an empty services directory.
+# Before=tml-daemon.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=tml
+Group=tml
+ExecStart=/usr/local/bin/tml-tock-agent
+
+[Install]
+WantedBy=multi-user.target

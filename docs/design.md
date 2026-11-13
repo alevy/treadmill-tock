@@ -343,34 +343,40 @@ a mismatch can at least be named.
 
 One announced service per remote transport, reached over a WebSocket through
 the job gateway — the same path `tml job ws-proxy` already uses. Behind each
-service is a listener that accepts a connection, spawns
-`tock --transport <name> broker`, and carries its stdio.
+service, **`websocat` terminates the WebSocket and spawns
+`tock --transport <name> broker`**, handing it the connection on its stdio.
 
-**Corrected after implementation — this paragraph was wrong as written.** It
-said the listener "splices its stdio", implying a raw byte pipe. It cannot be
-one. The developer's side opens `wss://` (`client/src/wsproxy.rs:124`) and the
-in-job Caddy renders `reverse_proxy "<upstream>"`
-(`cli/src/daemon/service_proxy.rs:147`) — plain HTTP reverse proxying — so
-nothing in that path terminates the WebSocket. A raw TCP listener hands `tock
-broker` an HTTP upgrade request on its stdin and no byte ever reaches the
-board. **The listener must itself be a WebSocket server**, completing the
-handshake and carrying the child's stdio as binary frames. The established
-precedent for a job-service upstream is ttyd, an HTTP/WebSocket server for
-exactly this reason.
+**This section has been rewritten twice; both earlier versions were wrong,
+and in instructive ways.**
 
-Frame boundaries carry no meaning either way: both ends write each payload
-straight through, `tock-proto` does its own length-framing on top, and
-WebSocket preserves order. Both ends chunk at 16 KiB, so a
-hundreds-of-kilobytes flash write crosses as many frames rather than one.
+The first said the listener "splices its stdio" over a raw TCP socket. It
+cannot: the developer's end opens `wss://` and the in-job Caddy renders
+`reverse_proxy "<upstream>"` (`cli/src/daemon/service_proxy.rs`), plain HTTP
+reverse proxying that forwards the upgrade rather than terminating it. A raw
+listener hands `tock broker` an HTTP upgrade request on its stdin and no byte
+ever reaches the board.
 
-Chosen over tunnelling SSH: fewer layers on a path where each one costs a
-round trip, and no SSH key handling inside the transport.
+The second had the agent implement a WebSocket server itself. That worked,
+but it was the wrong thing to own. Of its 83 lines of code only ten touched a
+WebSocket type — the rest was process supervision: EOF in both directions,
+reaping, killing a broker that still held the probe. Two shipped bugs lived
+there (a `splice(2)` short read that hung, a shell wrapper that would have
+orphaned the broker) and none lived in the protocol.
 
-**Builder's call, and the first thing to revisit under measurement:**
-process-per-connection means openocd attaches afresh on every `tock` command,
-which on some probes is the slowest thing in the loop. A broker persisting for
-the life of the reservation would remove that, at the cost of deciding what
-`Close` means when the device is not going away. Measure before building it.
+`websocat` is a general implementation of exactly that supervision, it is
+already in the image and sha256-pinned per arch, and the image's SSH service
+already uses it in this shape. So the agent stopped being a server. It is now
+a config generator, and the carrier is two systemd units (`deploy/`).
+
+What that trades away, stated plainly: properties the old code said out loud
+become flags. "One broker at a time" — a requirement, since a debug probe
+cannot be shared — is now `--exit-on-eof` plus `Restart=`. "A short read
+arrives as its own frame" is now trust in `--binary`. And errors arrive in
+`websocat`'s vocabulary rather than `tock-proto`'s structured refusals.
+
+`docs/tock-as-a-library.md` works through what would collapse if `tock`'s
+broker were reachable as a crate rather than only as a binary, and why the
+binary boundary is not purely a cost.
 
 ### 4. One change upstream in `tockloader-ng`
 

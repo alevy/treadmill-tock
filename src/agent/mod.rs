@@ -7,7 +7,6 @@
 //! freshly spawned `tock ... broker`.
 
 pub mod render;
-pub mod serve;
 
 /// The protocol token a service declares for a raw `tock-proto` stream
 /// reached over the job's WebSocket proxy — playing the same role `sshws`

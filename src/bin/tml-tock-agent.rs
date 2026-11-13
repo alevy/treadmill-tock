@@ -4,45 +4,39 @@
 //! `setup` runs once, at job start: it reads the host's hardware
 //! description, writes the `tock` user config that points at this host's
 //! wiring, and declares one network service per transport the DUT
-//! supports, so a developer's machine can connect. `serve` is the listener
-//! behind each of those services — see [`treadmill_tock::agent::serve`].
+//! supports, so a developer's machine can connect.
+//!
+//! Nothing here carries bytes. Each declared service names a unix socket
+//! that `websocat` listens on, terminating the WebSocket the developer's
+//! end opens and handing the connection to a `tock --transport <name>
+//! broker` it spawns. That is the same shape the image already uses for
+//! SSH, and it is why this agent is a config generator and not a server:
+//! bridging a socket to a process's stdio is exactly what `websocat`
+//! does, and the lifetimes involved are where the bugs were when we did
+//! it ourselves. See `deploy/` for the units.
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use tokio::net::TcpListener;
-
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser};
 use serde::Serialize;
 
 use treadmill_rs::api::switchboard::jobs::JobServiceAnnouncement;
 use treadmill_rs::host_spec::HostSpecLatest;
 use treadmill_tock::agent::BROKER_PROTOCOL;
 use treadmill_tock::agent::render::{render_config, select_dut};
-use treadmill_tock::agent::serve::{default_command, serve};
 use treadmill_tock::routing::{self, RemoteTransport};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "tml-tock-agent",
-    about = "Configures tock and serves its brokers inside a Treadmill job"
+    about = "Configures tock for the board wired to this Treadmill host"
 )]
 struct Cli {
-    #[command(subcommand)]
-    command: AgentCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum AgentCommand {
-    /// Reads the host spec, writes the tock config for its DUT, and
-    /// declares a network service per transport the DUT supports.
-    Setup(SetupArgs),
-    /// Listens for connections and splices each to a freshly spawned
-    /// broker.
-    Serve(ServeArgs),
+    #[command(flatten)]
+    setup: SetupArgs,
 }
 
 #[derive(Debug, Args)]
@@ -69,76 +63,20 @@ struct SetupArgs {
     board: Option<String>,
 }
 
-#[derive(Debug, Args)]
-struct ServeArgs {
-    /// The `tock` transport name this listener serves, e.g. `openocd` or
-    /// `serial`. Fills in the default spawned command.
-    #[arg(long)]
-    transport: String,
-
-    /// The local address to accept connections on.
-    #[arg(long)]
-    listen: SocketAddr,
-
-    /// Overrides the command spawned for each connection. Defaults to
-    /// `tock --transport <name> broker`.
-    ///
-    /// This is a test seam (so a test can substitute e.g. `cat` for `tock`),
-    /// not a general command runner: it is whitespace-split into a program
-    /// and arguments and spawned directly, with no shell involved — no
-    /// quoting, no pipes, no globs, no `$VAR` expansion.
-    #[arg(long)]
-    command: Option<String>,
-}
-
 fn main() -> Result<()> {
-    match Cli::parse().command {
-        AgentCommand::Setup(args) => setup(&args),
-        // `serve` is a WebSocket server (see
-        // `treadmill_tock::agent::serve`), so it needs a runtime; `setup`
-        // is a few file reads and writes and stays blocking.
-        AgentCommand::Serve(args) => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("Starting the async runtime")?
-            .block_on(run_serve(&args)),
-    }
+    setup(&Cli::parse().setup)
 }
 
-/// Binds the listener, reports the bound address on stdout (so a caller
-/// that asked for an ephemeral port can learn which one it got), then
-/// serves connections forever.
-async fn run_serve(args: &ServeArgs) -> Result<()> {
-    let listener = TcpListener::bind(args.listen)
-        .await
-        .with_context(|| format!("Binding the listener to {}", args.listen))?;
-    let local_addr = listener
-        .local_addr()
-        .context("Reading back the listener's bound address")?;
-
-    println!("{local_addr}");
-    std::io::Write::flush(&mut std::io::stdout()).context("Flushing stdout")?;
-
-    let command = args
-        .command
-        .clone()
-        .unwrap_or_else(|| default_command(&args.transport));
-
-    serve(listener, &command)
-        .await
-        .context("Serving connections")
-}
-
-/// The fixed loopback port each transport's listener is expected to bind,
-/// so a service declaration's `upstream` and the listener that answers it
-/// agree without any further coordination. Whatever starts `serve` (a
-/// systemd unit, in the shipped image) must pass this same port as
-/// `--listen`.
-fn upstream_port(transport: RemoteTransport) -> u16 {
-    match transport {
-        RemoteTransport::Openocd => 17001,
-        RemoteTransport::Serial => 17002,
-    }
+/// The unix socket a transport's `websocat` listens on, and so the
+/// `upstream` its service declaration names.
+///
+/// A socket under `/run` rather than a loopback port, matching the image's
+/// SSH service: systemd creates the directory with `RuntimeDirectory=`, the
+/// permissions are the filesystem's, and nothing has to allocate or agree
+/// on a port number. The unit that runs `websocat` must name this same
+/// path.
+fn upstream_socket(transport: RemoteTransport) -> String {
+    format!("/run/tml-tock-{}/broker.sock", transport.as_str())
 }
 
 /// One `*.json` file under the services directory: a [`JobServiceAnnouncement`]
@@ -217,7 +155,9 @@ fn default_config_path() -> Result<PathBuf> {
 
 fn declare_service(services_dir: &Path, transport: RemoteTransport) -> Result<()> {
     let name = transport.service_name();
-    let upstream = SocketAddr::from(([127, 0, 0, 1], upstream_port(transport)));
+    // `unix/` plus an absolute path is how Caddy names a unix upstream, so
+    // the rendered vhost reads `reverse_proxy "unix//run/..."`.
+    let upstream = format!("unix/{}", upstream_socket(transport));
 
     let declaration = ServiceDeclaration {
         service: JobServiceAnnouncement {
@@ -225,7 +165,7 @@ fn declare_service(services_dir: &Path, transport: RemoteTransport) -> Result<()
             label: Some(format!("tock {}", transport.as_str())),
             protocol: BROKER_PROTOCOL.to_string(),
         },
-        upstream: Some(upstream.to_string()),
+        upstream: Some(upstream),
     };
 
     let path = services_dir.join(format!("{name}.json"));
