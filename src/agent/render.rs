@@ -30,11 +30,14 @@ pub enum SelectError {
     None,
     /// Several DUTs are wired to the host and none was named, so picking one
     /// would risk silently serving the wrong board.
-    #[error("host has several DUTs wired to it ({boards:?}); name one to pick it")]
-    Ambiguous { boards: Vec<String> },
+    #[error("host has several DUTs wired to it ({candidates:?}); name one to pick it")]
+    Ambiguous { candidates: Vec<String> },
     /// The named DUT is not among those wired to the host.
-    #[error("no DUT named `{wanted}` is wired to this host; it has {boards:?}")]
-    NotFound { wanted: String, boards: Vec<String> },
+    #[error("no DUT named `{wanted}` is wired to this host; it has {candidates:?}")]
+    NotFound {
+        wanted: String,
+        candidates: Vec<String>,
+    },
 }
 
 /// Why [`render_config`] or [`probe_config`] could not produce a config.
@@ -56,23 +59,51 @@ pub fn select_dut<'a>(
     wanted: Option<&str>,
 ) -> Result<&'a DutV2, SelectError> {
     if let Some(wanted) = wanted {
+        // A name first, because that is the only thing that tells two
+        // identical boards apart. A real host in the fleet carries four
+        // nRF52840DKs distinguished solely by `name` ("nRF52840-DK #0"
+        // through "#3"); their `board` is the same string four times and
+        // their serials live on the probe, not the board.
+        if let Some(dut) = spec
+            .duts
+            .iter()
+            .find(|dut| dut.name.as_deref() == Some(wanted))
+        {
+            return Ok(dut);
+        }
+
+        // Then a board. Several matches is not an error here: the job holds
+        // the whole host exclusively, so every matching board is already
+        // yours, and "give me an nRF52840DK" is answered correctly by any
+        // of them. First in spec order, so the choice is at least stable
+        // across runs. Pass a name to pin a particular one.
         return spec
             .duts
             .iter()
             .find(|dut| dut.board == wanted)
             .ok_or_else(|| SelectError::NotFound {
                 wanted: wanted.to_string(),
-                boards: spec.duts.iter().map(|dut| dut.board.clone()).collect(),
+                candidates: candidates(spec),
             });
     }
 
     match spec.duts.as_slice() {
         [] => Err(SelectError::None),
         [dut] => Ok(dut),
-        duts => Err(SelectError::Ambiguous {
-            boards: duts.iter().map(|dut| dut.board.clone()).collect(),
+        _ => Err(SelectError::Ambiguous {
+            candidates: candidates(spec),
         }),
     }
+}
+
+/// How a refusal names the DUTs it could have served: each one's `name` if
+/// it has one, else its `board`. Boards repeat on a multi-DUT host, so a
+/// list of them is no help to someone deciding what to ask for next.
+fn candidates(spec: &HostSpecLatest) -> Vec<String> {
+    spec.duts
+        .iter()
+        .map(|dut| dut.name.clone().unwrap_or_else(|| dut.board.clone()))
+        .collect()
 }
 
 /// An openocd `{ command = "..." }` config step.
@@ -87,17 +118,29 @@ fn command_step(command: String) -> toml::Value {
 /// `{ command = ... }` steps, in the order openocd wants — the interface
 /// first, then the protocol select, which is the only order it accepts.
 ///
-/// Starts with the two probes the fleet uses: a SEGGER J-Link (onboard on
-/// the nRF52840DK) and a Raspberry Pi Debug Probe (CMSIS-DAP, used with the
-/// Pico 2). Anything else is refused with [`RenderError::UnknownProbe`] — a
-/// clear failure beats a guess that silently flashes nothing.
+/// Covers the two probe families the fleet actually uses, as the host specs
+/// spell them: `Segger` / `J-Link` (onboard on the nRF52840DK) and
+/// `Raspberry Pi` / `Debug Probe` (used with the Pico 2). Anything else is
+/// refused with [`RenderError::UnknownProbe`] — a clear failure beats a
+/// guess that silently flashes nothing.
+///
+/// Matched case-insensitively, and on the model as a substring, because the
+/// strings are operator-authored prose rather than a registry: `Segger` and
+/// `SEGGER` both occur in the wild, and `J-Link`, `J-Link OB` and
+/// `J-Link EDU` are all the same `interface/jlink.cfg`. Loose enough to
+/// survive how a human types them, tight enough that an unrecognised probe
+/// still fails rather than guessing.
 ///
 /// When `debug.probe.serial` is set, appends an adapter-serial command: how
 /// a host with two identical probes addresses the right one.
 pub fn probe_config(debug: &DebugAccess) -> Result<Vec<toml::Value>, RenderError> {
-    let interface = match (debug.probe.vendor.as_str(), debug.probe.model.as_str()) {
-        ("SEGGER", "J-Link OB") => "interface/jlink.cfg",
-        ("Raspberry Pi", "Debug Probe (CMSIS-DAP)") => "interface/cmsis-dap.cfg",
+    let vendor = debug.probe.vendor.to_ascii_lowercase();
+    let model = debug.probe.model.to_ascii_lowercase();
+    let interface = match (vendor.as_str(), model.as_str()) {
+        ("segger", m) if m.contains("j-link") || m.contains("jlink") => "interface/jlink.cfg",
+        ("raspberry pi", m) if m.contains("debug probe") || m.contains("cmsis-dap") => {
+            "interface/cmsis-dap.cfg"
+        }
         _ => {
             return Err(RenderError::UnknownProbe {
                 vendor: debug.probe.vendor.clone(),
@@ -106,11 +149,16 @@ pub fn probe_config(debug: &DebugAccess) -> Result<Vec<toml::Value>, RenderError
         }
     };
 
+    // Order matters to openocd, and this is the order its own docs use:
+    // source the interface, narrow it to one adapter, then select the wire
+    // protocol. `adapter serial` after `transport select` happens to work
+    // today (both run before `init`) but reads backwards and is not what
+    // openocd documents.
     let mut steps = vec![toml::Value::String(interface.to_string())];
-    steps.push(command_step(format!("transport select {}", debug.protocol)));
     if let Some(serial) = &debug.probe.serial {
         steps.push(command_step(format!("adapter serial {serial}")));
     }
+    steps.push(command_step(format!("transport select {}", debug.protocol)));
     Ok(steps)
 }
 
@@ -207,8 +255,8 @@ mod tests {
         DebugAccess {
             protocol: "swd".into(),
             probe: DebugProbe {
-                vendor: "SEGGER".into(),
-                model: "J-Link OB".into(),
+                vendor: "Segger".into(),
+                model: "J-Link".into(),
                 serial: None,
             },
         }
@@ -219,7 +267,7 @@ mod tests {
             protocol: "swd".into(),
             probe: DebugProbe {
                 vendor: "Raspberry Pi".into(),
-                model: "Debug Probe (CMSIS-DAP)".into(),
+                model: "Debug Probe".into(),
                 serial: None,
             },
         }
@@ -260,8 +308,8 @@ mod tests {
         let err = select_dut(&spec, None).unwrap_err();
         assert!(matches!(
             err,
-            SelectError::Ambiguous { boards }
-                if boards == vec!["nrf52840dk".to_string(), "raspberry_pi_pico_2".to_string()]
+            SelectError::Ambiguous { candidates }
+                if candidates == vec!["nrf52840dk".to_string(), "raspberry_pi_pico_2".to_string()]
         ));
     }
 
@@ -281,8 +329,8 @@ mod tests {
         let err = select_dut(&spec, Some("raspberry_pi_pico_2")).unwrap_err();
         assert!(matches!(
             err,
-            SelectError::NotFound { wanted, boards }
-                if wanted == "raspberry_pi_pico_2" && boards == vec!["nrf52840dk".to_string()]
+            SelectError::NotFound { wanted, candidates }
+                if wanted == "raspberry_pi_pico_2" && candidates == vec!["nrf52840dk".to_string()]
         ));
     }
 
@@ -391,5 +439,127 @@ mod tests {
             RenderError::UnknownProbe { vendor, model }
                 if vendor == "Acme" && model == "Mystery Probe"
         ));
+    }
+
+    /// A DUT with a display name, as every multi-DUT host in the fleet has.
+    fn named(name: &str, board: &str) -> DutV2 {
+        DutV2 {
+            name: Some(name.into()),
+            ..dut(board, Some(jlink_debug()), None)
+        }
+    }
+
+    /// `pton-rpi2000`, as the fleet actually describes it: four nRF52840DKs
+    /// whose `board` is the same string four times, told apart only by name.
+    fn four_identical_boards() -> HostSpecV2 {
+        spec(vec![
+            named("nRF52840-DK #0", "nrf52840dk"),
+            named("nRF52840-DK #1", "nrf52840dk"),
+            named("nRF52840-DK #2", "nrf52840dk"),
+            named("nRF52840-DK #3", "nrf52840dk"),
+        ])
+    }
+
+    #[test]
+    fn a_name_picks_one_of_several_identical_boards() {
+        let host = four_identical_boards();
+        let chosen = select_dut(&host, Some("nRF52840-DK #2")).expect("selects by name");
+        assert_eq!(chosen.name.as_deref(), Some("nRF52840-DK #2"));
+    }
+
+    #[test]
+    fn a_board_on_a_multi_dut_host_takes_the_first_in_spec_order() {
+        let host = four_identical_boards();
+        let chosen = select_dut(&host, Some("nrf52840dk")).expect("a board match is not ambiguous");
+        assert_eq!(chosen.name.as_deref(), Some("nRF52840-DK #0"));
+    }
+
+    #[test]
+    fn a_refusal_names_duts_that_can_be_told_apart() {
+        let host = four_identical_boards();
+        match select_dut(&host, None) {
+            Err(SelectError::Ambiguous { candidates }) => assert_eq!(
+                candidates,
+                vec![
+                    "nRF52840-DK #0",
+                    "nRF52840-DK #1",
+                    "nRF52840-DK #2",
+                    "nRF52840-DK #3"
+                ],
+                "a list of four identical boards tells nobody what to ask for"
+            ),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refuses_an_empty_host() {
+        assert!(matches!(
+            select_dut(&spec(vec![]), None),
+            Err(SelectError::None)
+        ));
+    }
+
+    #[test]
+    fn the_fleets_own_probe_strings_are_recognised() {
+        // Verbatim from `tml host show pton-rpi2003` and `pton-rpi2005`.
+        for (vendor, model, expected) in [
+            ("Segger", "J-Link", "interface/jlink.cfg"),
+            ("Raspberry Pi", "Debug Probe", "interface/cmsis-dap.cfg"),
+        ] {
+            let debug = DebugAccess {
+                protocol: "swd".into(),
+                probe: DebugProbe {
+                    vendor: vendor.into(),
+                    model: model.into(),
+                    serial: None,
+                },
+            };
+            let steps = probe_config(&debug).expect("the fleet's own probes resolve");
+            assert_eq!(steps[0].as_str(), Some(expected), "{vendor} {model}");
+        }
+    }
+
+    #[test]
+    fn probe_matching_survives_how_a_human_typed_it() {
+        for model in ["J-Link", "J-Link OB", "J-LINK EDU"] {
+            for vendor in ["Segger", "SEGGER"] {
+                let debug = DebugAccess {
+                    protocol: "swd".into(),
+                    probe: DebugProbe {
+                        vendor: vendor.into(),
+                        model: model.into(),
+                        serial: None,
+                    },
+                };
+                assert!(probe_config(&debug).is_ok(), "{vendor} / {model}");
+            }
+        }
+    }
+
+    #[test]
+    fn adapter_serial_precedes_transport_select() {
+        let debug = DebugAccess {
+            protocol: "swd".into(),
+            probe: DebugProbe {
+                vendor: "Segger".into(),
+                model: "J-Link".into(),
+                serial: Some("001050289140".into()),
+            },
+        };
+        let steps = probe_config(&debug).expect("resolves");
+        let rendered: Vec<String> = steps.iter().map(|s| format!("{s:?}")).collect();
+        let serial = rendered
+            .iter()
+            .position(|s| s.contains("adapter serial"))
+            .expect("the serial is pinned");
+        let transport = rendered
+            .iter()
+            .position(|s| s.contains("transport select"))
+            .expect("the protocol is selected");
+        assert!(
+            serial < transport,
+            "openocd documents narrowing the adapter before selecting transport: {rendered:?}"
+        );
     }
 }

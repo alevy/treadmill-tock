@@ -1,5 +1,10 @@
-//! `tock-transport-treadmill`: lets the `tock` CLI drive a device under test
-//! held in a Treadmill hardware testbed.
+//! `treadmill-tock`: lets the `tock` CLI drive a device under test held in a
+//! Treadmill hardware testbed.
+//!
+//! Two binaries are built from this crate: `tock-transport-treadmill`, which
+//! runs on a developer's machine as a `tock` transport, and
+//! `tml-tock-agent`, which runs inside the Treadmill job and configures
+//! `tock` for the board wired to that host.
 //!
 //! [`routing`] is the pure piece: given a DUT's description from a Treadmill
 //! host spec, it decides which remote transport serves which `tock`

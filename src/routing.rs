@@ -222,7 +222,6 @@ impl std::fmt::Display for RemoteTransport {
 mod tests {
     use std::collections::BTreeMap;
 
-    use tock_proto::Capability;
     use treadmill_rs::host_spec::{Console, DebugAccess, DebugProbe, DutV2};
 
     use super::*;

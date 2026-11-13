@@ -43,6 +43,10 @@ use treadmill_rs::api::switchboard::jobs::{
 use treadmill_rs::api::switchboard::{JobInitSpec, JobRequest, JobState};
 use treadmill_rs::host_spec::{HostSpec, HostSpecLatest};
 
+/// How many of the caller's jobs one listing asks for. Well above what a
+/// developer plausibly holds, and below the switchboard's 200 ceiling.
+const MAX_JOBS_LISTED: u32 = 200;
+
 use crate::relay::LinkFactory;
 use crate::reservation::{self, Decision};
 use crate::routing::RemoteTransport;
@@ -202,7 +206,11 @@ async fn list_mine(client: &SwitchboardClient, state: JobListState) -> Result<Ve
             include: "mine".to_string(),
             state,
             q: None,
-            limit: None,
+            // Explicit rather than relying on the switchboard's own
+            // default, which is unstated in the API and currently 50. A
+            // reusable reservation falling past the page boundary would
+            // silently provision a second host.
+            limit: Some(MAX_JOBS_LISTED),
             cursor: None,
         })
         .await

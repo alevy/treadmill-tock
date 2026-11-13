@@ -349,8 +349,10 @@ fn option_specs() -> Vec<OptionSpec> {
         },
         OptionSpec {
             name: "dut".into(),
-            description: "Which of a multi-DUT host's devices to resolve \
-                capability routing against (defaults to `board`)"
+            description: "Which of a multi-DUT host's devices to use: a DUT \
+                name (e.g. `nRF52840-DK #2`) to pin one of several identical \
+                boards, or a board identifier to take the first of that kind. \
+                Defaults to `board`"
                 .into(),
         },
     ];

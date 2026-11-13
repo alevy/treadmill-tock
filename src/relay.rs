@@ -207,6 +207,10 @@ impl<F: LinkFactory> Connection for Relay<F> {
                     .values()
                     .flat_map(|link| link.capabilities.iter().cloned())
                     .collect();
+                // Sorted before dedup: `Vec::dedup` only removes adjacent
+                // duplicates, and two links can advertise the same
+                // capability in any order.
+                capabilities.sort_by_key(|capability| capability.name());
                 capabilities.dedup();
                 let options = self
                     .links
