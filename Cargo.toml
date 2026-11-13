@@ -9,7 +9,8 @@ name = "tml-tock-agent"
 path = "src/bin/tml-tock-agent.rs"
 
 [dependencies]
-treadmill-rs = { workspace = true }
+treadmill-rs = { workspace = true, features = ["client"] }
+treadmill-client = { workspace = true, features = ["profile", "ws"] }
 
 anyhow = { workspace = true }
 chrono = { workspace = true }
@@ -18,6 +19,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tock-proto = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "sync", "time"] }
 toml = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
