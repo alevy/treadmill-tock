@@ -19,8 +19,8 @@
 //!   reserve a job (`treadmill::reserve`), confirm it actually serves that
 //!   board (`treadmill::check_board`), pick the DUT routing is resolved
 //!   against (`agent::render::select_dut`), resolve capability routing
-//!   (`routing::resolve`) and check every declared need is routable, then
-//!   hand a [`Relay`] a [`TunnelFactory`] bridging into the reservation.
+//!   (`routing::resolve`), then hand a [`Relay`] a [`TunnelFactory`]
+//!   bridging into the reservation.
 //!   Everything after `Open` is forwarded to that `Relay`.
 //!
 //! `main` builds a `tokio` runtime on its own worker threads — never the
@@ -101,13 +101,13 @@ impl Transport {
     }
 
     /// Does everything `Open` implies, in order: resolve the board, build
-    /// the predicate, reserve, check the board, resolve routing, verify the
-    /// caller's declared needs are routable, then build the `Relay`.
+    /// the predicate, reserve, check the board, resolve routing, then build
+    /// the `Relay`.
     ///
     /// Every failure here is the *operation* failing, never the connection:
-    /// a bad `image_set`, an empty fleet or an unroutable need is something
-    /// the caller can fix and retry with different options, so each becomes
-    /// a `Response::Error`, not an `Err`.
+    /// a bad `image_set`, an empty fleet or a board no host serves is
+    /// something the caller can fix and retry with different options, so
+    /// each becomes a `Response::Error`, not an `Err`.
     fn open(
         &mut self,
         open_board: &str,
@@ -203,20 +203,6 @@ impl Transport {
             Err(error) => return Response::error(ErrorKind::Selection, error.to_string()),
         };
 
-        // "Nothing here can do that" should arrive now, not on the first
-        // request that actually needs the missing capability.
-        for need in &needs {
-            if routing.get(need).is_none() {
-                return Response::error(
-                    ErrorKind::Unsupported,
-                    format!(
-                        "this DUT has no transport routed for `{}`, which this session needs",
-                        need.name()
-                    ),
-                );
-            }
-        }
-
         let factory =
             TunnelFactory::new(profile, diagnostics, self.handle.clone(), reserved.job_id);
         self.state = State::Opened(Relay::new(routing, factory, needs));
@@ -232,10 +218,24 @@ impl Connection for Transport {
     ) -> Result<(Response, Vec<u8>), ProtoError> {
         match request {
             Request::Hello { needs, .. } => {
-                // Only recorded, never acted on: answered from static
+                // Recorded, not acted on: `Hello` is answered from static
                 // knowledge alone, with nothing reserved. Left alone if a
                 // relay is already open, so a stray second `Hello` cannot
                 // wipe out a live session.
+                //
+                // In practice `needs` is always empty. `tock` greets a
+                // transport it chose with `&[]` and says why: "Nothing is
+                // asked for here: this end is opening a transport it
+                // chose" (`tock-cli/src/connection.rs`). So there is
+                // nothing for `Open` to check against the routing, and an
+                // up-front routability check would be a guarantee this end
+                // cannot make. What reports an unroutable capability is the
+                // lazy path in `Relay::link_for`, on the first request that
+                // needs it, naming the capability, the DUT and what that
+                // DUT does serve. `needs` is still carried into the `Relay`
+                // (which pre-opens a link per declared capability) so that a
+                // caller which does declare them is served as `tock broker`
+                // serves one.
                 if matches!(self.state, State::BeforeOpen { .. }) {
                     self.state = State::BeforeOpen { needs };
                 }

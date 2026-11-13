@@ -61,18 +61,45 @@ impl RemoteTransport {
 /// names are what an override names, what a routing error names, and what
 /// the wire protocol itself uses, so storing routes this way avoids
 /// round-tripping through `Capability` just to compare or display one.
+///
+/// The DUT is carried along with the routes because the one error this
+/// answers -- "nothing here serves that" -- is only useful if it can say
+/// *where* nothing serves it and what that somewhere does serve.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Routing(BTreeMap<String, RemoteTransport>);
+pub struct Routing {
+    dut: String,
+    routes: BTreeMap<String, RemoteTransport>,
+}
 
 impl Routing {
     /// The transport that serves `capability` on this DUT, if any.
     pub fn get(&self, capability: &Capability) -> Option<RemoteTransport> {
-        self.0.get(capability.name().as_str()).copied()
+        self.routes.get(capability.name().as_str()).copied()
     }
 
     /// Every transport this routing actually uses, each listed once.
     pub fn transports(&self) -> BTreeSet<RemoteTransport> {
-        self.0.values().copied().collect()
+        self.routes.values().copied().collect()
+    }
+
+    /// The DUT these routes were resolved for, as the Treadmill host spec
+    /// names its board.
+    pub fn dut(&self) -> &str {
+        &self.dut
+    }
+
+    /// What this DUT does serve: every capability with a transport routed
+    /// to it, in name order, as one comma-separated list -- or `nothing`,
+    /// which is what a DUT with no routes at all offers.
+    pub fn offers(&self) -> String {
+        if self.routes.is_empty() {
+            return "nothing".to_string();
+        }
+        self.routes
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -159,7 +186,10 @@ pub fn resolve(dut: &DutV2, overrides: &BTreeMap<String, String>) -> Result<Rout
         routes.insert(capability.clone(), transport);
     }
 
-    Ok(Routing(routes))
+    Ok(Routing {
+        dut: dut.board.clone(),
+        routes,
+    })
 }
 
 /// Whether `name` is a capability `tock-proto` actually has a story for, so

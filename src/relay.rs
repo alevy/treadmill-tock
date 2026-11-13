@@ -41,16 +41,32 @@ pub trait LinkFactory: Send {
 }
 
 /// Why [`Relay`] could not route a request to a transport.
+///
+/// This is where an unroutable capability is reported, and the only place:
+/// `tock` greets a transport it chose with no declared `needs` at all (see
+/// [`Relay::new`]), so there is nothing to check up front and the first
+/// request that needs a missing capability is what finds it missing. That
+/// makes the message load-bearing -- it has to name the capability, the DUT
+/// it was asked of, and what that DUT does serve, because the caller sees
+/// nothing else.
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
     /// The routing has no entry at all for this capability.
-    #[error("nothing is routed to `{capability}` for this device")]
-    NoRoute { capability: String },
+    #[error("DUT `{dut}` has no transport routed for `{capability}`; it serves {offers}")]
+    NoRoute {
+        capability: String,
+        dut: String,
+        offers: String,
+    },
     /// The routing sends this capability to a transport whose own `Hello`
     /// did not list it.
-    #[error("`{capability}` is routed to transport `{transport}`, which does not advertise it")]
+    #[error(
+        "`{capability}` is routed to transport `{transport}` for DUT `{dut}`, \
+         which does not advertise it"
+    )]
     NotAdvertised {
         capability: String,
+        dut: String,
         transport: RemoteTransport,
     },
 }
@@ -61,7 +77,18 @@ impl From<RelayError> for ProtoError {
             RelayError::NoRoute { .. } => ErrorKind::Selection,
             RelayError::NotAdvertised { .. } => ErrorKind::Unsupported,
         };
-        ProtoError::failed(error.to_string()).with_kind(kind)
+        let suggestion = match &error {
+            RelayError::NoRoute { capability, .. } => Some(format!(
+                "if this DUT really serves `{capability}`, name the transport \
+                 explicitly with --opt route.{capability}=<transport>"
+            )),
+            RelayError::NotAdvertised { .. } => None,
+        };
+        let proto = ProtoError::failed(error.to_string()).with_kind(kind);
+        match suggestion {
+            Some(suggestion) => proto.with_suggestion(suggestion),
+            None => proto,
+        }
     }
 }
 
@@ -128,6 +155,8 @@ impl<F: LinkFactory> Relay<F> {
         let transport = self.routing.get(capability).ok_or_else(|| {
             ProtoError::from(RelayError::NoRoute {
                 capability: capability.name(),
+                dut: self.routing.dut().to_string(),
+                offers: self.routing.offers(),
             })
         })?;
         if !self.links.contains_key(&transport) {
@@ -145,6 +174,7 @@ impl<F: LinkFactory> Relay<F> {
             if !client.capabilities.contains(capability) {
                 return Err(RelayError::NotAdvertised {
                     capability: capability.name(),
+                    dut: self.routing.dut().to_string(),
                     transport,
                 }
                 .into());
@@ -540,6 +570,31 @@ mod tests {
                 assert_eq!(message, "the device said no");
             }
             other => panic!("expected a relayed refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unroutable_capability_names_the_dut_and_what_it_serves() {
+        // A DUT with a console wired to it and no debug probe: nothing
+        // serves a memory read. `tock` declares no `needs`, so no up-front
+        // check can report that -- this error is the whole report, and it
+        // has to say which capability, on which DUT, and what that DUT
+        // does serve.
+        let mut console_only = dut();
+        console_only.debug = None;
+        let routing = routing::resolve(&console_only, &BTreeMap::new()).unwrap();
+        let mut relay = Relay::new(routing, FakeFactory(both_links()), vec![]);
+
+        let err = relay
+            .call(Request::Read { address: 0, len: 4 }, vec![])
+            .unwrap_err();
+
+        let message = err.to_string();
+        for expected in ["memory_read", "nrf52840dk", "console"] {
+            assert!(
+                message.contains(expected),
+                "the message should name {expected}, but was: {message}"
+            );
         }
     }
 
