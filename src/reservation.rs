@@ -206,6 +206,24 @@ mod tests {
     }
 
     #[test]
+    fn a_job_with_no_lease_expiry_is_extended() {
+        let host_id = Uuid::new_v4();
+        let now = Utc::now();
+        let target = job(JobState::Ready, Some(host_id), None);
+        let job_id = target.job_id;
+
+        let decision = choose(&[target], &report(vec![host_id]), now, EXTEND_WITHIN);
+
+        assert_eq!(
+            decision,
+            Decision::Reuse {
+                job_id,
+                extend: true
+            }
+        );
+    }
+
+    #[test]
     fn extends_a_lease_inside_the_window() {
         let host_id = Uuid::new_v4();
         let now = Utc::now();
@@ -214,6 +232,24 @@ mod tests {
             Some(host_id),
             Some(now + TimeDelta::minutes(4)),
         );
+        let job_id = target.job_id;
+
+        let decision = choose(&[target], &report(vec![host_id]), now, EXTEND_WITHIN);
+
+        assert_eq!(
+            decision,
+            Decision::Reuse {
+                job_id,
+                extend: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_lease_expiring_exactly_at_the_window_is_extended() {
+        let host_id = Uuid::new_v4();
+        let now = Utc::now();
+        let target = job(JobState::Ready, Some(host_id), Some(now + EXTEND_WITHIN));
         let job_id = target.job_id;
 
         let decision = choose(&[target], &report(vec![host_id]), now, EXTEND_WITHIN);
