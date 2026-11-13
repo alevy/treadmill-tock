@@ -23,24 +23,32 @@ that one:
   DUT actually supports, so enabling an instance whose transport this DUT
   lacks announces nothing and costs an idle websocat.
 
-## Three things to verify on the first real deployment
+## Verified against websocat 1.14.2
 
-None of these can be checked without hardware, and each fails quietly
-rather than loudly.
+Two of the three unknowns were checked empirically rather than on hardware.
+The image pins **1.14.1**; these were run against **1.14.2**, so a version
+mismatch is still possible, but both behaviours are long-standing.
 
-1. **`exec:` semantics.** `exec:tock --exec-args --transport %i broker`
-   should spawn `tock` directly, with no shell between websocat and the
-   broker. That matters: a shell in between means the process websocat
-   signals is not the one holding the probe, which is a bug this project
-   already shipped once and fixed. Confirm against websocat 1.14.1
-   specifically; if `exec:` does not behave, `cmd:` works but reintroduces
-   the shell.
-2. **Frame boundaries under `--binary`.** The developer's end writes a
-   request and waits for a reply, so a short read must leave as its own
-   frame rather than sit in a buffer. A buffering carrier here hangs rather
-   than errors — the same failure mode as the `splice(2)` short-read bug
-   fixed in this crate's history (see `git log`).
+1. **`exec:` spawns without a shell.** `exec:sleep --exec-args 120` put
+   `sleep` directly under websocat — `/proc/<pid>/comm` is `sleep`, cmdline
+   `sleep 120`, no shell in between. So the process websocat signals is the
+   one holding the probe. This matters because it is a bug this project
+   already shipped once, in its own listener, and fixed.
+2. **`--binary` preserves short reads as their own frames.** A child writing
+   `AAAA`, pausing, then `BBBB` produced two separate 4-byte binary frames
+   (opcode 2), not one buffered 8-byte frame. A buffering carrier here would
+   hang rather than error, which is the same failure mode as the `splice(2)`
+   short-read bug in this crate's history. websocat also sends a Close frame
+   when the child reaches EOF.
+
+## Still unverified — needs hardware
+
 3. **Probe permissions.** The units run as `tml`, matching the SSH service.
    `tock broker` reaches a USB debug probe, which needs udev rules granting
-   that user access. `openocd` failing to claim the probe is the most
-   likely first-run failure.
+   that user access. `openocd` failing to claim the probe is the most likely
+   first-run failure.
+4. **The carrier end to end.** `websocat` and the developer side's
+   `wsproxy::run` have never been executed against each other — only each
+   against a stand-in. That is the seam where two Critical defects hid behind
+   a green suite during development. The first successful `tock list` against
+   a real host is the test.
