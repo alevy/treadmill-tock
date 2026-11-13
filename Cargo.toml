@@ -4,10 +4,17 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "tml-tock-agent"
+path = "src/bin/tml-tock-agent.rs"
+
 [dependencies]
 treadmill-rs = { workspace = true }
 
+anyhow = { workspace = true }
 chrono = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tock-proto = { workspace = true }
