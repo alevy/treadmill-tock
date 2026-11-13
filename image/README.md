@@ -74,14 +74,18 @@ mismatch is still possible, but both behaviours are long-standing.
    short-read bug in this crate's history. websocat also sends a Close frame
    when the child reaches EOF.
 
+3. **Brokers are not serialised.** Measured on a live host: two concurrent
+   `tock` clients produce two concurrent brokers, and the second dies with
+   `LIBUSB_ERROR_BUSY`. See the comment in `tml-tock-broker@.service` for
+   why this is left alone and what the fix would be.
+
 ## Still unverified — needs hardware
 
-3. **Probe permissions.** The units run as `tml`, matching the SSH service.
-   `tock broker` reaches a USB debug probe, which needs udev rules granting
-   that user access. `openocd` failing to claim the probe is the most likely
-   first-run failure.
-4. **The carrier end to end.** `websocat` and the developer side's
-   `wsproxy::run` have never been executed against each other — only each
-   against a stand-in. That is the seam where two Critical defects hid behind
-   a green suite during development. The first successful `tock list` against
-   a real host is the test.
+4. **Probe permissions in a built image.** Verified by hand that `tml` can
+   claim a J-Link, but not through this layer's own install path.
+
+5. **This layer's own install path.** The end-to-end run that proved the
+   carrier (see the top-level README) was staged by hand on a stock image —
+   binaries copied in, units created with `systemd-run`. Everything this
+   layer does was exercised, but not by this layer. Building it is what
+   remains.
