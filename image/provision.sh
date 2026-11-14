@@ -1,137 +1,111 @@
 #!/bin/sh
 set -eu
 
-# A Raspberry Pi 5 host whose only job is to carry the `tock` protocol to the
-# board wired to it.
+# The Tock bridge: carry the `tock` protocol from a developer's machine to
+# the board wired to this host.
 #
-# This is a root image, not a layer on `../base`: that base is a developer
-# workstation -- compilers for three architectures, editors, gdb, tmux -- and
-# none of it is reachable from a protocol relay. What is left below is the
-# netboot plumbing, OpenOCD, and the four binaries that move bytes.
-#
-# The Raspberry Pi OS and NBD arrangement is taken wholesale from
-# `../base/provision.sh`; where the two agree, that file is the original and
-# the comments there explain why.
+# A layer on the published base, which already provides everything this
+# borrows -- `websocat` for the carrier, an OpenOCD built from a pinned
+# commit for the probe, the Treadmill daemon and its caddy. Nothing is
+# fetched here and nothing is built; this installs four binaries and wires
+# them up.
 
-: "${TML_ARCH:?}"
-: "${TML_IMAGE_DIR:?}"
 : "${TML_PAYLOAD_DIR:?}"
-
-# Installing nbd-client triggers update-initramfs, which under Raspberry Pi
-# OS's default MODULES=dep probes the current root device and fails in a
-# no-boot build. MODULES=most bundles a broad set without probing, which an
-# NBD-netboot image needs anyway.
-mkdir -p /etc/initramfs-tools/conf.d
-cat >/etc/initramfs-tools/conf.d/10-tml-netboot <<'CONF'
-MODULES=most
-CONF
-
-# The whole package list. `dbus` is how the tml daemon is reachable,
-# `ca-certificates` is how it reaches the switchboard, and the other two are
-# how the root file system arrives and resolves. OpenOCD's build
-# dependencies are installed and then purged by install-openocd.sh, so they
-# are deliberately absent here -- naming one would make it permanent.
-apt-get install -y \
-	ca-certificates \
-	dbus \
-	nbd-client \
-	systemd-resolved
-
-"$TML_IMAGE_DIR/install-openocd.sh"
-
-# No ttyd, no sshd, no Rust toolchain. A bridge has no terminal to serve and
-# nothing to build. SSH is the one real loss -- it is how you look at a host
-# that is misbehaving -- so it is a single `yes` away when a deployment wants
-# it back.
-# shellcheck disable=SC2016,SC2089,SC2090
-daemon_args='--supervisor-url "http://$(ip route show 0.0.0.0/0 | cut -d" " -f3 | head -n1):3859"'
-serial_consoles=''
-with_ttyd=no
-with_ssh=no
-with_rustup=no
-# shellcheck disable=SC2090
-export daemon_args serial_consoles with_ttyd with_ssh with_rustup
-"$TML_IMAGE_DIR/treadmill-guest.sh"
-
-usermod -a -G dialout tml
-usermod -a -G gpio tml
-
-# --- the bridge itself -------------------------------------------------
 
 # Four binaries, which is the whole of it: `tock` for its `broker`
 # subcommand, one transport per capability, and the agent that writes their
-# config. `tock`'s other subcommands are a debugging convenience for someone
-# logged in, and nothing can log in here.
+# config at job start. The payload carries `tock`'s other subcommands too --
+# they are a convenience for a human logged in over SSH, not part of the
+# path to the board.
 for binary in tock tock-transport-openocd tock-transport-serial tml-tock-agent; do
 	install -m 0755 "$TML_PAYLOAD_DIR/$binary" "/usr/local/bin/$binary"
 done
 
+# Which `tock` this image ships. A developer's machine resolves its own board
+# file, and a layout that disagrees with this one produces confusing refusals
+# rather than a clear error; recording the version at least lets a mismatch
+# be named.
 mkdir -p /etc/tml
 tock --version >/etc/tml/tock-version 2>/dev/null ||
 	echo unknown >/etc/tml/tock-version
 
-install -m 0644 "$TML_IMAGE_DIR/tml-tock-setup.service" \
-	/etc/systemd/system/tml-tock-setup.service
-install -m 0644 "$TML_IMAGE_DIR/tml-tock-broker@.service" \
-	/etc/systemd/system/tml-tock-broker@.service
-systemctl enable tml-tock-setup.service
-systemctl enable tml-tock-broker@openocd.service
-systemctl enable tml-tock-broker@serial.service
-
-# --- netboot plumbing, as in ../base -----------------------------------
-
-cat >/etc/fstab <<'FSTAB'
-proc /proc proc defaults 0 0
-/dev/nbd0 / ext4 defaults,noatime,nodiratime 0 1
-/dev/nbd1 /boot/firmware vfat defaults,x-systemd.requires=tml-nbd-boot.service,x-systemd.after=tml-nbd-boot.service 0 2
-FSTAB
-
-cat >/etc/systemd/system/tml-nbd-boot.service <<'SERVICE'
+# Writes tock's config for the DUT wired to this host. Runs as root:
+# /etc/tml/services.d is root-owned, and the config has to land in tml's
+# home because the brokers run as tml and that is where `tock` looks.
+cat >/etc/systemd/system/tml-tock-setup.service <<'SERVICE'
 [Unit]
-Description=Attach the boot file system over NBD
-DefaultDependencies=no
-Before=boot-firmware.mount
+Description=Configure tock for the board wired to this host
+After=network.target
+Before=tml-daemon.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'exec nbd-client "$(ip -4 route show default | cut -d" " -f3 | head -n1)" -N bootfs /dev/nbd1'
-ExecStop=/usr/sbin/nbd-client -d /dev/nbd1
+ExecStart=/usr/local/bin/tml-tock-agent --config /home/tml/.config/tock/config.toml
+ExecStartPost=/bin/chown -R tml:tml /home/tml/.config/tock
+[Install]
+WantedBy=multi-user.target
 SERVICE
+systemctl enable tml-tock-setup.service
 
-cat >/boot/firmware/cmdline.txt <<'CMDLINE'
-console=serial0,115200 ip=dhcp root=/dev/nbd0 rw nbdroot=dhcp,rootfs,nbd0 rootfstype=ext4 fsckfix rootwait net.ifnames=0 loglevel=7
-CMDLINE
+# One instance per transport. websocat terminates the WebSocket a
+# developer's `tock` opens through the job gateway and hands the connection
+# to a broker it spawns; %i is both the socket directory's suffix and the
+# transport `tock` is pinned to.
+#
+# Brokers are not serialised, which is measured rather than assumed:
+# websocat keeps listening between connections and spawns one broker per
+# connection, so two clients at once get two brokers and the second fails in
+# OpenOCD with LIBUSB_ERROR_BUSY. Sequential use -- the actual development
+# loop -- is fine, and concurrent use of one board is a developer racing
+# themselves on a host they hold exclusively. A `.socket` unit with
+# `Accept=yes` and `MaxConnections=1` is the fix if it ever matters.
+#
+# RestartSec=0, where the image's SSH service uses 5s: an ssh client retries
+# a refused connection, and `tock-transport-treadmill` does not.
+cat >/etc/systemd/system/tml-tock-broker@.service <<'SERVICE'
+[Unit]
+Description=Serve a tock %i broker over a WebSocket
+After=network.target tml-tock-setup.service
+Requires=tml-tock-setup.service
+[Service]
+User=tml
+Group=tml
+RuntimeDirectory=tml-tock-%i
+RuntimeDirectoryMode=0755
+ExecStart=/usr/local/bin/websocat --binary --exit-on-eof \
+    ws-u:unix-l:/run/tml-tock-%i/broker.sock \
+    exec:tock --exec-args --transport %i broker
+Restart=always
+RestartSec=0
+[Install]
+WantedBy=multi-user.target
+SERVICE
+systemctl enable tml-tock-broker@openocd.service
+systemctl enable tml-tock-broker@serial.service
 
-mask_units() {
-	for unit in "$@"; do
-		ln -snf /dev/null "/etc/systemd/system/$unit"
-	done
+# Declared here rather than left to the agent, because the Treadmill daemon
+# reads this directory once at start-up and `tml job reload-services` does
+# not work -- its D-Bus handler runs on a thread with no tokio reactor and
+# panics, returning success. A declaration written after the daemon starts
+# is therefore never announced. These exist before it ever runs.
+#
+# Both transports are declared unconditionally. The agent only generates
+# config for what the DUT actually has, so an announced service whose
+# transport this board lacks fails on connect rather than misbehaving.
+mkdir -p /etc/tml/services.d
+cat >/etc/tml/services.d/tockopenocd.json <<'SERVICEDECL'
+{
+	"name": "tockopenocd",
+	"label": "tock openocd",
+	"protocol": "tockws",
+	"upstream": "unix//run/tml-tock-openocd/broker.sock"
 }
-
-mask_units \
-	dphys-swapfile.service \
-	rpi-eeprom-update.service \
-	userconfig.service \
-	systemd-hostnamed.service \
-	systemd-hostnamed.socket \
-	systemd-logind.service \
-	rpi-resize.service \
-	systemd-growfs-root.service \
-	rpi-resize-swap-file.service \
-	sshswitch.service \
-	cloud-init.service \
-	cloud-init-local.service \
-	cloud-init-network.service \
-	cloud-final.service \
-	cloud-init.target
-
-# Raspberry Pi OS defaults to NetworkManager. eth0 carries the NBD root, so
-# it must be networkd's alone or the two fight over the interface the root
-# filesystem arrives on.
-mask_units \
-	NetworkManager.service \
-	NetworkManager-wait-online.service \
-	dhcpcd.service
-
-# No `systemctl enable ssh.service`, and no /boot/firmware/ssh.txt: there is
-# no sshd in this image to enable.
+SERVICEDECL
+cat >/etc/tml/services.d/tockserial.json <<'SERVICEDECL'
+{
+	"name": "tockserial",
+	"label": "tock serial",
+	"protocol": "tockws",
+	"upstream": "unix//run/tml-tock-serial/broker.sock"
+}
+SERVICEDECL

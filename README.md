@@ -87,8 +87,49 @@ may depend on this crate.
 
 ## Deploying
 
-`image/` is the Treadmill image: a single-purpose Raspberry Pi 5 host that
-carries the protocol to the board and does nothing else. Four apt packages
-rather than the 47 of the existing developer-workstation base, no web
-terminal, no toolchain, no SSH. The
+`image/` is a Treadmill image layer, and the whole of it is three files:
+
+```
+image.json       title, arch, type, base, publish
+provision.sh     plain shell, run inside the guest
+description.txt  becomes the OCI description
+```
+
+There is no `inputs.json` because nothing external is fetched: the base
+already carries `websocat` for the carrier and an OpenOCD built from a
+pinned commit for the probe. The layer installs four binaries, writes two
+systemd units and two service declarations, and stops.
+
+It builds on the **published** base rather than a checkout, so nothing here
+has to be copied into the images repository to build or publish it:
+
+```json
+"base": "ghcr.io/treadmill-tb/raspberrypios-13:latest"
+```
+
+`build-image.sh` takes any directory, so point it at this one in place:
+
+```sh
+cd <images-checkout> && nix develop
+
+payload=$(nix build --no-link --print-out-paths <this-repo>#payload-aarch64)
+args=(); for f in "$payload"/bin/*; do args+=(--payload "$f"); done
+
+# skopeo rejects a v1 /etc/containers/registries.conf; an empty v2 file is
+# what the images CI uses too.
+export CONTAINERS_REGISTRIES_CONF=$(mktemp)
+
+build/build-chain.sh --image <this-repo>/image -o out/tock-bridge "${args[@]}"
+```
+
+Two host requirements, neither of which this repository can arrange:
+
+- **qemu user emulation**, because provisioning runs the guest's package
+  manager under an aarch64 userland. The images CI avoids it by building on
+  native ARM runners. On NixOS,
+  `boot.binfmt.emulatedSystems = [ "aarch64-linux" ];` and a rebuild.
+- **root**, for `modprobe nbd` and mounting the qcow2. `build-image.sh` runs
+  `sudo` itself.
+
+Publishing is `skopeo copy --all oci:out/tock-bridge docker://ghcr.io/<owner>/tock-bridge-rpi:<tag>`. The
 carrier is `websocat`, matching the image's existing SSH service.

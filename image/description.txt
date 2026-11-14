@@ -1,1 +1,1 @@
-A Raspberry Pi 5 host that does one thing: let a developer drive the Tock board wired to it from their own machine, using the ordinary `tock` commands. No web terminal, no toolchain, no editors -- only what carries the protocol to the board.
+Raspberry Pi OS 13 for Treadmill NBD-netbooted boards, with the Tock bridge: a developer drives the board wired to this host from their own machine, using the ordinary `tock` commands.
