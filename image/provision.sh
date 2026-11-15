@@ -29,14 +29,21 @@ mkdir -p /etc/tml
 tock --version >/etc/tml/tock-version 2>/dev/null ||
 	echo unknown >/etc/tml/tock-version
 
-# Writes tock's config for the DUT wired to this host. Runs as root:
-# /etc/tml/services.d is root-owned, and the config has to land in tml's
-# home because the brokers run as tml and that is where `tock` looks.
+# Writes tock's config for the DUT wired to this host. Runs as root because
+# the config has to land in tml's home, and the brokers run as tml.
+#
+# After the daemon, not before: the daemon is what writes
+# /run/tml/host-spec.json, and this reads it. `Type=notify` on that unit
+# means systemd holds this back until the daemon reports ready, by which
+# point the file is there. Ordering it first -- which an earlier version did,
+# to get service declarations in before the daemon read them -- made the
+# agent fail on a file that could not exist yet. The declarations are
+# written into the image instead, so nothing here needs to beat the daemon.
 cat >/etc/systemd/system/tml-tock-setup.service <<'SERVICE'
 [Unit]
 Description=Configure tock for the board wired to this host
-After=network.target
-Before=tml-daemon.service
+After=network.target tml-daemon.service
+Requires=tml-daemon.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes

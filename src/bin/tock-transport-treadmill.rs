@@ -162,6 +162,13 @@ impl Transport {
             Err(response) => return response,
         };
 
+        // Resolved before reserving, not after: a job enqueued now carries
+        // this to the in-image agent as a parameter, and the agent cannot
+        // pick between several identical boards without it.
+        let dut_identifier = get_str(options, "dut")
+            .unwrap_or(board.as_str())
+            .to_string();
+
         let profile = session::Options::default();
         // Stderr, not `Silent` and never stdout: stdout carries the
         // `tock-proto` frames this process exists to serve, and a
@@ -186,6 +193,7 @@ impl Transport {
             image_set,
             lease,
             extend_within,
+            &dut_identifier,
             &progress,
         ));
         drop(session);
@@ -208,8 +216,7 @@ impl Transport {
             return Response::error(ErrorKind::Selection, error.to_string());
         }
 
-        let dut_identifier = get_str(options, "dut").unwrap_or(board.as_str());
-        let dut = match select_dut(&reserved.spec, Some(dut_identifier)) {
+        let dut = match select_dut(&reserved.spec, Some(&dut_identifier)) {
             Ok(dut) => dut,
             Err(error) => {
                 return Response::error(ErrorKind::Selection, error.to_string()).about(["dut"]);

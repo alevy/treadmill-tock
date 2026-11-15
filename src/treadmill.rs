@@ -31,12 +31,15 @@ use chrono::{Duration, Utc};
 use tock_proto::{Connection, ProtoError, StreamChannel};
 use uuid::Uuid;
 
+use std::collections::HashMap;
 use treadmill_client::diagnostics::Diagnostics;
 use treadmill_client::session::{self, Session};
 use treadmill_client::wsproxy;
 use treadmill_rs::api::switchboard::client::SwitchboardClient;
 use treadmill_rs::api::switchboard::hosts::HostRequirementsRequest;
+
 use treadmill_rs::api::switchboard::hosts::SpecDocument;
+use treadmill_rs::api::switchboard::jobs::JobParameter;
 use treadmill_rs::api::switchboard::jobs::{
     JobLeaseExpiryAction, JobListQuery, JobListState, JobSummary, LeaseSpec, RestartPolicy,
     UpdateJobRequest,
@@ -104,6 +107,7 @@ pub async fn reserve(
     image_set: Uuid,
     lease: Duration,
     extend_within: Duration,
+    dut: &str,
     progress: &dyn Fn(&str),
 ) -> Result<Reserved> {
     let client = session.authenticated_client()?;
@@ -163,7 +167,19 @@ pub async fn reserve(
                     label: None,
                     owner: None,
                     restart_policy: RestartPolicy { max_restarts: 0 },
-                    parameters: Default::default(),
+                    // The in-image agent configures `tock` for one DUT,
+                    // and on a host carrying several it cannot guess which.
+                    // Only this end knows: it is what the predicate asked
+                    // for. A real host in the fleet has four identical
+                    // nRF52840DKs, where without this the agent refuses and
+                    // the brokers never start.
+                    parameters: HashMap::from([(
+                        "board".to_string(),
+                        JobParameter {
+                            value: dut.to_string(),
+                            secret: false,
+                        },
+                    )]),
                     host_cel_predicate: predicate.to_string(),
                     lease_duration: Some(lease),
                     lease_expiry_action: Some(JobLeaseExpiryAction::Preempt),
