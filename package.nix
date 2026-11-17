@@ -32,7 +32,7 @@ rustPlatform.buildRustPackage {
     # One entry per crate taken from a git dependency. `nix build` prints
     # the correct hash when a pin moves and this does not.
     outputHashes = {
-      "tock-proto-0.0.1" = "sha256-5XM6bF/Ry03xDHd5fe78T8GFPKFKrnBwU8rob0OSldc=";
+      "tock-proto-0.0.1" = "sha256-qAfdyrcwXrPAIW53tErYAg/RCZLUHwlf7DD+ZMAtcA4=";
       "treadmill-rs-0.3.0" = "sha256-blHhLwRNyyxUmEsYovdm4vVi1+AXAPbdt79AdHaQUfA=";
       "treadmill-client-0.1.0" = "sha256-blHhLwRNyyxUmEsYovdm4vVi1+AXAPbdt79AdHaQUfA=";
     };

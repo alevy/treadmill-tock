@@ -51,7 +51,12 @@ transport = [
 # manual verification in `docs/` when you do.
 #
 #   tock-proto     -- the protocol `tock` speaks to a transport.
-#                     48ff38f is the tip of `origin/main`.
+#                     48ff38f is the tip of `origin/main`. Three places pin
+#                     this revision and all three move together: here,
+#                     `tock.nix`'s rev/hash, and `package.nix`'s
+#                     `outputHashes` entry for the vendored crate. Only the
+#                     first is visible to cargo, so a stale third shows up
+#                     as a nix hash mismatch and nowhere else.
 #   treadmill-rs   -- Treadmill's wire types and switchboard client.
 #   treadmill-client -- session, profile and job-service WebSocket mechanics.
 #                     9bc2f8f is the tip of `client-library`, which is not yet
