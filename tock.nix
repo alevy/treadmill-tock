@@ -9,8 +9,8 @@
   stdenv,
   rustPlatform,
   fetchgit,
-  rev ? "512fc834d39a2539aeb2076f6778d2910cd024bc",
-  hash ? "sha256-5XM6bF/Ry03xDHd5fe78T8GFPKFKrnBwU8rob0OSldc=",
+  rev ? "48ff38f4cbba7a0ca92d2555aae88fa801db9b29",
+  hash ? "sha256-qAfdyrcwXrPAIW53tErYAg/RCZLUHwlf7DD+ZMAtcA4=",
 }:
 
 let

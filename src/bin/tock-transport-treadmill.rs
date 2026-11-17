@@ -21,11 +21,13 @@
 //!   against (`agent::render::select_dut`), resolve capability routing
 //!   (`routing::resolve`), then hand a [`Relay`] a [`TunnelFactory`]
 //!   bridging into the reservation.
-//!   Everything after `Open` is forwarded to that `Relay`.
+//!   Everything after `Open` is forwarded to that `Relay`. Console bytes
+//!   travel the other way with nothing asked for: the `Relay` pushes them
+//!   into the [`tock_proto::ConsoleSink`] `serve_streaming` provides.
 //!
 //! `main` builds a `tokio` runtime on its own worker threads — never the
-//! thread running the blocking `tock_proto::serve` loop below, which would
-//! otherwise starve it — and [`TunnelFactory`] and `Open`'s own
+//! thread running the blocking `tock_proto::serve_streaming` loop below,
+//! which would otherwise starve it — and [`TunnelFactory`] and `Open`'s own
 //! `treadmill::reserve` call cross into it via [`tokio::runtime::Handle`].
 
 use std::collections::BTreeMap;
@@ -35,7 +37,9 @@ use chrono::Duration;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use tock_proto::{Capability, Connection, ErrorKind, OptionSpec, ProtoError, Request, Response};
+use tock_proto::{
+    Capability, Connection, ConsoleSink, ErrorKind, OptionSpec, ProtoError, Request, Response,
+};
 use treadmill_client::diagnostics::Diagnostics;
 use treadmill_client::session::{self, Session};
 use treadmill_tock::agent::render::select_dut;
@@ -71,8 +75,10 @@ fn main() {
 
     let mut transport = Transport::new(runtime.handle().clone());
     let stdin = std::io::stdin().lock();
-    let stdout = std::io::stdout().lock();
-    if let Err(error) = tock_proto::serve(stdin, stdout, &mut transport) {
+    // Not `.lock()` on stdout: `serve_streaming` keeps the writer past this
+    // call, so it must be `Send + 'static`, which `StdoutLock` is not.
+    let stdout = std::io::stdout();
+    if let Err(error) = tock_proto::serve_streaming(stdin, stdout, &mut transport) {
         eprintln!("tock-transport-treadmill: {error}");
         std::process::exit(1);
     }
@@ -91,6 +97,10 @@ enum State {
 struct Transport {
     handle: tokio::runtime::Handle,
     state: State,
+    /// Where this connection's pushed console bytes go. Kept from before
+    /// the serve loop started until `Open` builds the [`Relay`] that pushes
+    /// into it.
+    console: Option<ConsoleSink>,
 }
 
 impl Transport {
@@ -98,6 +108,7 @@ impl Transport {
         Transport {
             handle,
             state: State::BeforeOpen { needs: Vec::new() },
+            console: None,
         }
     }
 
@@ -230,7 +241,11 @@ impl Transport {
 
         let factory =
             TunnelFactory::new(profile, diagnostics, self.handle.clone(), reserved.job_id);
-        self.state = State::Opened(Relay::new(routing, factory, needs));
+        let mut relay = Relay::new(routing, factory, needs);
+        if let Some(sink) = self.console.clone() {
+            relay.set_console_sink(sink);
+        }
+        self.state = State::Opened(relay);
         Response::Ok
     }
 }
@@ -286,6 +301,12 @@ impl Connection for Transport {
                 )),
             },
         }
+    }
+
+    /// Handed over once, before the serve loop starts -- which is before
+    /// `Open` has built a relay to give it to.
+    fn set_console_sink(&mut self, sink: ConsoleSink) {
+        self.console = Some(sink);
     }
 }
 

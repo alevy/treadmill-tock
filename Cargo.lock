@@ -2146,7 +2146,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 [[package]]
 name = "tock-proto"
 version = "0.0.1"
-source = "git+https://github.com/alevy/tockloader-next?rev=512fc83#512fc834d39a2539aeb2076f6778d2910cd024bc"
+source = "git+https://github.com/alevy/tockloader-next?rev=48ff38f#48ff38f4cbba7a0ca92d2555aae88fa801db9b29"
 dependencies = [
  "serde",
  "serde_json",

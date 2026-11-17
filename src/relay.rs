@@ -20,12 +20,26 @@
 //! task. It is kept synchronous and `Send` on purpose: a later task bridges
 //! it to async behind the trait, and doing that here would commit this seam
 //! to a runtime before anything used one.
+//!
+//! A relay is both ends of the protocol at once. Upstream it is a responder,
+//! served by [`tock_proto::serve_streaming`], which hands it a
+//! [`ConsoleSink`]; downstream it is a caller, and every link it opens is a
+//! [`crate::pump`] pushing into that sink, so console bytes the device sent
+//! reach the caller with nothing in between.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 
-use tock_proto::{Capability, Client, Connection, ErrorKind, ProtoError, Request, Response};
+use tock_proto::{
+    Capability, Client, Connection, ConsoleSink, ErrorKind, ProtoError, Request, Response,
+};
 
+use crate::pump::{self, Sink};
 use crate::routing::{RemoteTransport, Routing};
+
+/// The two halves of a connection to one remote transport: a reader for a
+/// pump's thread to own, and a writer the relay keeps.
+pub type Halves = (Box<dyn Read + Send>, Box<dyn Write>);
 
 /// Opens a connection to one remote transport.
 ///
@@ -35,9 +49,13 @@ use crate::routing::{RemoteTransport, Routing};
 /// implementation, which opens a tunnel to the Treadmill host, is a later
 /// task.
 pub trait LinkFactory: Send {
-    /// Open a connection to `transport`. Called once per transport, the
-    /// first time a request needs it.
-    fn open(&mut self, transport: RemoteTransport) -> Result<Box<dyn Connection>, ProtoError>;
+    /// Open a connection to `transport`, as the two halves it is made of.
+    /// Called once per transport, the first time a request needs it.
+    ///
+    /// Halves rather than a [`Connection`]: the reader goes to a pump
+    /// thread, and where that pump's pushes belong is the relay's to say,
+    /// not the factory's.
+    fn open(&mut self, transport: RemoteTransport) -> Result<Halves, ProtoError>;
 }
 
 /// Why [`Relay`] could not route a request to a transport.
@@ -100,7 +118,9 @@ fn needed_for(request: &Request) -> Option<Capability> {
     Some(match request {
         Request::Read { .. } => Capability::MemoryRead,
         Request::Write { .. } => Capability::MemoryWrite,
-        Request::ConsoleRead { .. } | Request::ConsoleWrite => Capability::Console,
+        Request::ConsoleWrite | Request::ConsoleAttach | Request::ConsoleDetach => {
+            Capability::Console
+        }
         Request::Reset => Capability::Reset,
         Request::Vendor { name, .. } => Capability::Vendor(name.clone()),
         Request::Hello { .. } | Request::Open { .. } | Request::Close => return None,
@@ -131,6 +151,10 @@ pub struct Relay<F: LinkFactory> {
     needs: Vec<Capability>,
     /// One greeted link per transport we have had to open, by transport.
     links: BTreeMap<RemoteTransport, Client>,
+    /// Where our own pushed console bytes go. `None` until
+    /// [`tock_proto::serve_streaming`] hands one over, and for good under
+    /// plain [`tock_proto::serve`].
+    upstream: Option<ConsoleSink>,
 }
 
 impl<F: LinkFactory> Relay<F> {
@@ -143,7 +167,21 @@ impl<F: LinkFactory> Relay<F> {
             factory,
             needs,
             links: BTreeMap::new(),
+            upstream: None,
         }
+    }
+
+    /// The sink a link's pump pushes into: our own, upstream, so a byte the
+    /// device sent travels caller-wards without anyone asking for it.
+    fn pushes_upstream(&self) -> Sink {
+        let upstream = self.upstream.clone();
+        Box::new(move |bytes: &[u8]| {
+            if let Some(sink) = &upstream {
+                // A caller that has gone away is the serve loop's news to
+                // hear, at the end of its own stream.
+                let _ = sink.push(bytes);
+            }
+        })
     }
 
     /// The link serving `capability`, opened and greeted if it is not
@@ -151,6 +189,11 @@ impl<F: LinkFactory> Relay<F> {
     ///
     /// Opened on demand: a session that only ever exercises one of its
     /// declared capabilities should only ever cost one link.
+    ///
+    /// Every link's reader goes on a pump, not just the console's. Which
+    /// transport carries the console is a routing decision -- and
+    /// `route.console=openocd` is a supported override -- so the link that
+    /// was opened for a memory read may be the one that later pushes.
     fn link_for(&mut self, capability: &Capability) -> Result<&mut Client, ProtoError> {
         let transport = self.routing.get(capability).ok_or_else(|| {
             ProtoError::from(RelayError::NoRoute {
@@ -160,7 +203,8 @@ impl<F: LinkFactory> Relay<F> {
             })
         })?;
         if !self.links.contains_key(&transport) {
-            let connection = self.factory.open(transport)?;
+            let (reader, writer) = self.factory.open(transport)?;
+            let connection = Box::new(pump::pumped(reader, writer, self.pushes_upstream()));
             // Greeted with the capability the link is being opened for, and
             // not with `&[]`: the far end is `tock --transport <name>
             // broker`, which opens links only for what the greeting
@@ -243,18 +287,31 @@ impl<F: LinkFactory> Connection for Relay<F> {
             }
         }
     }
+
+    fn set_console_sink(&mut self, sink: ConsoleSink) {
+        self.upstream = Some(sink);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
+    use std::os::unix::net::UnixStream;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    use tock_proto::{Capability, Connection, ErrorKind, ProtoError, Request, Response};
+    use tock_proto::{
+        Capability, Connection, ErrorKind, ProtoError, Request, Response, read_frame, write_frame,
+    };
     use treadmill_rs::host_spec::{Console, DebugAccess, DebugProbe, DutV2};
 
     use super::*;
     use crate::routing::{self, RemoteTransport, Routing};
+
+    /// How long a fake link may go quiet before the pump reading it gives
+    /// up, so that a wedged link fails a test rather than hanging one.
+    /// Every link here is a socket pair inside this process.
+    const PATIENCE: Duration = Duration::from_secs(10);
 
     /// A DUT with both a debug probe and a console wired to it, so the
     /// default routing sends memory/reset to `Openocd` and console to
@@ -289,7 +346,7 @@ mod tests {
         routing::resolve(&dut(), &BTreeMap::new()).unwrap()
     }
 
-    /// What a [`FakeLink`] reports in `Hello`, and how it answers everything
+    /// What a fake link reports in `Hello`, and how it answers everything
     /// else, shared with the test that configured it so assertions can be
     /// made after the link has been moved into a [`Relay`].
     #[derive(Clone)]
@@ -319,9 +376,10 @@ mod tests {
         }
     }
 
-    /// An in-process stand-in for a remote transport, answering `Hello` the
-    /// way the real far end does and everything else from its queued
-    /// answers (or `Ok(Response::Ok)` if the queue is empty).
+    /// An in-process stand-in for a remote transport, speaking framed
+    /// `tock-proto` down `stream`: answering `Hello` the way the real far
+    /// end does and everything else from `spec`'s queued answers (or
+    /// `Ok(Response::Ok)` if the queue is empty).
     ///
     /// The far end of a link is `tock --transport <name> broker`, and what
     /// it advertises is not a static list: it opens a link **only for the
@@ -335,42 +393,45 @@ mod tests {
     /// `capabilities` is therefore what this link *could* serve: a greeting
     /// that declares any of them opens the one link behind this service,
     /// whose whole capability set is then advertised.
-    struct FakeLink {
-        spec: LinkSpec,
-    }
-
-    impl Connection for FakeLink {
-        fn call(
-            &mut self,
-            request: Request,
-            _payload: Vec<u8>,
-        ) -> Result<(Response, Vec<u8>), ProtoError> {
-            self.spec.seen.lock().unwrap().push(request.clone());
-            if let Request::Hello { needs, .. } = &request {
-                let opened = needs
-                    .iter()
-                    .any(|need| self.spec.capabilities.contains(need));
-                let capabilities = if opened {
-                    self.spec.capabilities.clone()
-                } else {
-                    Vec::new()
-                };
-                return Ok((
-                    Response::Hello {
-                        protocol: tock_proto::PROTOCOL_VERSION,
-                        version: "fake".into(),
-                        capabilities,
-                        options: vec![],
-                    },
-                    vec![],
-                ));
+    ///
+    /// A queued answer that is an error drops the socket instead of being
+    /// written, which is what a link breaking looks like from this end.
+    fn serve_link(stream: UnixStream, spec: LinkSpec) {
+        let mut reader = stream.try_clone().expect("cloning the fake link's socket");
+        let mut writer = stream;
+        while let Ok(Some((request, _payload))) = read_frame::<_, Request>(&mut reader) {
+            spec.seen.lock().unwrap().push(request.clone());
+            let close = request == Request::Close;
+            let answer = match &request {
+                Request::Hello { needs, .. } => {
+                    let opened = needs.iter().any(|need| spec.capabilities.contains(need));
+                    let capabilities = match opened {
+                        true => spec.capabilities.clone(),
+                        false => Vec::new(),
+                    };
+                    Ok((
+                        Response::Hello {
+                            protocol: tock_proto::PROTOCOL_VERSION,
+                            version: "fake".into(),
+                            capabilities,
+                            options: vec![],
+                        },
+                        vec![],
+                    ))
+                }
+                _ => spec
+                    .answers
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Ok((Response::Ok, vec![]))),
+            };
+            let Ok((response, payload)) = answer else {
+                return;
+            };
+            if write_frame(&mut writer, &response, &payload).is_err() || close {
+                return;
             }
-            self.spec
-                .answers
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(Ok((Response::Ok, vec![])))
         }
     }
 
@@ -397,7 +458,7 @@ mod tests {
     struct FakeFactory(FactoryHandle);
 
     impl LinkFactory for FakeFactory {
-        fn open(&mut self, transport: RemoteTransport) -> Result<Box<dyn Connection>, ProtoError> {
+        fn open(&mut self, transport: RemoteTransport) -> Result<Halves, ProtoError> {
             self.0.opened.lock().unwrap().push(transport);
             let spec = self
                 .0
@@ -407,7 +468,11 @@ mod tests {
                 .get(&transport)
                 .unwrap_or_else(|| panic!("test did not provide a link for {transport}"))
                 .clone();
-            Ok(Box::new(FakeLink { spec }))
+            let (ours, theirs) = UnixStream::pair()?;
+            std::thread::spawn(move || serve_link(theirs, spec));
+            let reader = ours.try_clone()?;
+            reader.set_read_timeout(Some(PATIENCE))?;
+            Ok((Box::new(reader), Box::new(ours)))
         }
     }
 
@@ -451,29 +516,20 @@ mod tests {
     }
 
     #[test]
-    fn console_read_goes_to_the_serial_link() {
+    fn a_console_attach_goes_to_the_serial_link() {
         let handle = both_links();
         let mut relay = Relay::new(full_routing(), FakeFactory(handle.clone()), vec![]);
 
-        relay
-            .call(
-                Request::ConsoleRead {
-                    max: 64,
-                    timeout_ms: 10,
-                },
-                vec![],
-            )
-            .unwrap();
+        relay.call(Request::ConsoleAttach, vec![]).unwrap();
 
         assert_eq!(handle.opened(), vec![RemoteTransport::Serial]);
         let serial = handle.links.lock().unwrap()[&RemoteTransport::Serial].clone();
-        assert!(serial.requests().iter().any(|r| matches!(
-            r,
-            Request::ConsoleRead {
-                max: 64,
-                timeout_ms: 10
-            }
-        )));
+        assert!(
+            serial
+                .requests()
+                .iter()
+                .any(|r| matches!(r, Request::ConsoleAttach))
+        );
     }
 
     #[test]
@@ -484,15 +540,7 @@ mod tests {
         let handle = both_links();
         let mut relay = Relay::new(full_routing(), FakeFactory(handle.clone()), vec![]);
 
-        relay
-            .call(
-                Request::ConsoleRead {
-                    max: 1,
-                    timeout_ms: 1,
-                },
-                vec![],
-            )
-            .unwrap();
+        relay.call(Request::ConsoleAttach, vec![]).unwrap();
 
         let serial = handle.links.lock().unwrap()[&RemoteTransport::Serial].clone();
         let greeting = serial
@@ -561,13 +609,7 @@ mod tests {
         handle.provide(RemoteTransport::Serial, serial);
         let mut relay = Relay::new(full_routing(), FakeFactory(handle), vec![]);
 
-        let result = relay.call(
-            Request::ConsoleRead {
-                max: 1,
-                timeout_ms: 1,
-            },
-            vec![],
-        );
+        let result = relay.call(Request::ConsoleAttach, vec![]);
 
         match result {
             Ok((Response::Error { message, .. }, _)) => {
@@ -614,15 +656,7 @@ mod tests {
         handle.provide(RemoteTransport::Serial, LinkSpec::new(vec![]));
         let mut relay = Relay::new(full_routing(), FakeFactory(handle), vec![]);
 
-        let err = relay
-            .call(
-                Request::ConsoleRead {
-                    max: 1,
-                    timeout_ms: 1,
-                },
-                vec![],
-            )
-            .unwrap_err();
+        let err = relay.call(Request::ConsoleAttach, vec![]).unwrap_err();
 
         let message = err.to_string();
         assert!(message.contains("console"), "message was: {message}");
@@ -637,13 +671,10 @@ mod tests {
         handle.provide(RemoteTransport::Serial, serial);
         let mut relay = Relay::new(full_routing(), FakeFactory(handle), vec![]);
 
-        let result = relay.call(
-            Request::ConsoleRead {
-                max: 1,
-                timeout_ms: 1,
-            },
-            vec![],
-        );
+        // The link dies with the request outstanding. That must come back
+        // as a failure of the connection, and come back at all: the caller
+        // is waiting for a frame nobody will ever send.
+        let result = relay.call(Request::ConsoleAttach, vec![]);
 
         assert!(
             result.is_err(),
@@ -659,28 +690,12 @@ mod tests {
         relay
             .call(Request::Read { address: 0, len: 4 }, vec![])
             .unwrap();
-        relay
-            .call(
-                Request::ConsoleRead {
-                    max: 1,
-                    timeout_ms: 1,
-                },
-                vec![],
-            )
-            .unwrap();
+        relay.call(Request::ConsoleAttach, vec![]).unwrap();
         assert_eq!(handle.opened().len(), 2);
 
         relay.call(Request::Close, vec![]).unwrap();
 
-        relay
-            .call(
-                Request::ConsoleRead {
-                    max: 1,
-                    timeout_ms: 1,
-                },
-                vec![],
-            )
-            .unwrap();
+        relay.call(Request::ConsoleAttach, vec![]).unwrap();
         assert_eq!(
             handle.opened().len(),
             3,

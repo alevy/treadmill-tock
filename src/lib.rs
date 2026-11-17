@@ -13,7 +13,9 @@
 //! reuse a held job or create a new one. [`relay`] is the forwarding core:
 //! a `tock_proto::Connection` that answers the small handshake itself and
 //! routes everything else, by capability, to whichever remote link serves
-//! it. [`agent`] is what runs on the Treadmill host itself. [`treadmill`] is
+//! it; [`pump`] is the thread that owns one such link's reader, so console
+//! bytes the far end pushes are read while nothing is being asked of it.
+//! [`agent`] is what runs on the Treadmill host itself. [`treadmill`] is
 //! the live wiring: it reserves a job on a host serving the wanted board,
 //! reads that host's spec, and tunnels `tock-proto` to the broker services
 //! running inside the job. [`diagnostics`] is where all of it reports to a
@@ -22,6 +24,8 @@
 pub mod agent;
 #[cfg(feature = "transport")]
 pub mod diagnostics;
+#[cfg(feature = "transport")]
+pub mod pump;
 #[cfg(feature = "transport")]
 pub mod relay;
 #[cfg(feature = "transport")]

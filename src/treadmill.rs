@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Duration, Utc};
-use tock_proto::{Connection, ProtoError, StreamChannel};
+use tock_proto::ProtoError;
 use uuid::Uuid;
 
 use std::collections::HashMap;
@@ -51,7 +51,7 @@ use treadmill_rs::host_spec::{HostSpec, HostSpecLatest};
 /// developer plausibly holds, and below the switchboard's 200 ceiling.
 const MAX_JOBS_LISTED: u32 = 200;
 
-use crate::relay::LinkFactory;
+use crate::relay::{Halves, LinkFactory};
 use crate::reservation::{self, Decision};
 use crate::routing::RemoteTransport;
 
@@ -401,12 +401,12 @@ pub fn check_board(spec: &HostSpecLatest, wanted: &str) -> Result<(), BoardMisma
 /// loopback `TcpListener`, spawn a tokio task that accepts the one
 /// connection `open` is about to make on it and runs [`wsproxy::run`] over
 /// that socket, then connect to the same listener with a blocking
-/// `std::net::TcpStream` and hand the caller that stream wrapped in a
-/// [`StreamChannel`]. `tokio_util::io::SyncIoBridge` was deliberately not
-/// used here — its runtime-context requirements make it fragile across this
-/// particular sync/async boundary. The loopback hop costs microseconds
-/// against the wide-area round trip to the switchboard, and it is the same
-/// shape `tml job ws-proxy --listen-addr` already uses in production.
+/// `std::net::TcpStream` and hand back that stream's two halves.
+/// `tokio_util::io::SyncIoBridge` was deliberately not used here — its
+/// runtime-context requirements make it fragile across this particular
+/// sync/async boundary. The loopback hop costs microseconds against the
+/// wide-area round trip to the switchboard, and it is the same shape
+/// `tml job ws-proxy --listen-addr` already uses in production.
 ///
 /// **A `Session` per tunnel, never a shared one.** [`wsproxy::run`] needs
 /// `&mut Session` for as long as a tunnel is bridging bytes — which is the
@@ -451,7 +451,7 @@ impl TunnelFactory {
 }
 
 impl LinkFactory for TunnelFactory {
-    fn open(&mut self, transport: RemoteTransport) -> Result<Box<dyn Connection>, ProtoError> {
+    fn open(&mut self, transport: RemoteTransport) -> Result<Halves, ProtoError> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
@@ -469,7 +469,7 @@ impl LinkFactory for TunnelFactory {
 
         let writer = TcpStream::connect(addr)?;
         let reader = writer.try_clone()?;
-        Ok(Box::new(StreamChannel { reader, writer }))
+        Ok((Box::new(reader), Box::new(writer)))
     }
 }
 

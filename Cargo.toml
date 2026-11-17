@@ -21,7 +21,7 @@ required-features = ["transport"]
 # with `--no-default-features` it drops reqwest, rustls and aws-lc-sys
 # entirely -- which is most of the dependency tree, all of the C, and the
 # only thing that made cross-compiling it for the image awkward.
-# Both integration tests drive the transport, so they follow its feature
+# Every integration test drives the transport, so they follow its feature
 # rather than failing to compile when the agent is built alone.
 [[test]]
 name = "transport_handshake"
@@ -29,6 +29,10 @@ required-features = ["transport"]
 
 [[test]]
 name = "tunnel_concurrency"
+required-features = ["transport"]
+
+[[test]]
+name = "console_push"
 required-features = ["transport"]
 
 [features]
@@ -47,7 +51,12 @@ transport = [
 # manual verification in `docs/` when you do.
 #
 #   tock-proto     -- the protocol `tock` speaks to a transport.
-#                     512fc83 is the tip of `origin/cli/boards`.
+#                     48ff38f is the tip of `origin/main`. Three places pin
+#                     this revision and all three move together: here,
+#                     `tock.nix`'s rev/hash, and `package.nix`'s
+#                     `outputHashes` entry for the vendored crate. Only the
+#                     first is visible to cargo, so a stale third shows up
+#                     as a nix hash mismatch and nowhere else.
 #   treadmill-rs   -- Treadmill's wire types and switchboard client.
 #   treadmill-client -- session, profile and job-service WebSocket mechanics.
 #                     9bc2f8f is the tip of `client-library`, which is not yet
@@ -56,7 +65,7 @@ transport = [
 # The dependency points one way only: neither tockloader-ng nor treadmill may
 # ever depend on this crate.
 [dependencies]
-tock-proto = { git = "https://github.com/alevy/tockloader-next", rev = "512fc83" }
+tock-proto = { git = "https://github.com/alevy/tockloader-next", rev = "48ff38f" }
 treadmill-rs = { git = "https://github.com/treadmill-tb/treadmill", rev = "9bc2f8f" }
 treadmill-client = { git = "https://github.com/treadmill-tb/treadmill", rev = "9bc2f8f", optional = true, features = [
   "profile",
