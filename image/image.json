@@ -1,4 +1,5 @@
 {
+  "name": "tock-bridge-rpi",
   "title": "Raspberry Pi OS 13 (NBD) with Tock board access",
   "arch": "aarch64",
   "type": "sd",
